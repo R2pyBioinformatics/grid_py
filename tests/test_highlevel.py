@@ -6,9 +6,6 @@ legend_grob, grid_grill, grid_abline, grid_show_layout, and layout_torture.
 
 import warnings
 
-import matplotlib
-matplotlib.use("Agg")
-
 import pytest
 
 import grid_py

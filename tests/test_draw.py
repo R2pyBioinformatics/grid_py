@@ -1,14 +1,9 @@
 """Tests for grid_py._draw -- drawing engine, display list, and helpers."""
 
-import matplotlib
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
 from grid_py._draw import (
-    _gpar_to_mpl,
     delay_grob,
     grid_dl_apply,
     grid_draw,
@@ -19,8 +14,7 @@ from grid_py._draw import (
 )
 from grid_py._gpar import Gpar
 from grid_py._grob import GList, GTree, Grob
-# grid_py._primitives is not imported directly; we use helper functions
-# to construct simple grobs with plain float attributes.
+from grid_py.renderer import CairoRenderer, _parse_colour
 from grid_py._state import GridState, get_state
 
 
@@ -52,12 +46,10 @@ def _make_null_grob(name="testnull"):
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """Ensure each test starts with a clean grid state and closed figures."""
-    plt.close("all")
+    """Ensure each test starts with a clean grid state."""
     state = get_state()
     state.reset()
     yield
-    plt.close("all")
 
 
 # ------------------------------------------------------------------ #
@@ -66,22 +58,22 @@ def _reset_state():
 
 
 class TestGridNewpage:
-    """grid_newpage creates (or resets) a matplotlib figure."""
+    """grid_newpage creates (or resets) a CairoRenderer."""
 
-    def test_creates_figure(self):
+    def test_creates_renderer(self):
         grid_newpage()
         state = get_state()
-        fig, ax = state.get_device()
-        assert fig is not None
-        assert ax is not None
+        renderer = state.get_renderer()
+        assert renderer is not None
+        assert isinstance(renderer, CairoRenderer)
 
-    def test_axes_limits(self):
-        """After newpage, axes span [0,1] x [0,1]."""
-        grid_newpage()
+    def test_renderer_dimensions(self):
+        """After newpage, renderer has the expected dimensions."""
+        grid_newpage(width=5.0, height=4.0, dpi=100)
         state = get_state()
-        _, ax = state.get_device()
-        assert ax.get_xlim() == (0, 1)
-        assert ax.get_ylim() == (0, 1)
+        renderer = state.get_renderer()
+        assert renderer.width_in == 5.0
+        assert renderer.height_in == 4.0
 
     def test_clears_display_list(self):
         """Display list should be empty after newpage."""
@@ -162,8 +154,8 @@ class TestGridRefresh:
         # This should replay the display list
         grid_refresh()
         state = get_state()
-        fig, ax = state.get_device()
-        assert fig is not None
+        renderer = state.get_renderer()
+        assert renderer is not None
 
 
 # ------------------------------------------------------------------ #
@@ -294,69 +286,32 @@ class TestGridPretty:
 
 
 # ------------------------------------------------------------------ #
-# _gpar_to_mpl conversion                                           #
+# _parse_colour (renderer colour helper)                             #
 # ------------------------------------------------------------------ #
 
 
-class TestGparToMpl:
-    """_gpar_to_mpl converts Gpar to matplotlib keyword arguments."""
+class TestParseColour:
+    """_parse_colour converts R colour specs to (r, g, b, a)."""
 
-    def test_none_returns_empty(self):
-        assert _gpar_to_mpl(None) == {}
+    def test_none_returns_black(self):
+        assert _parse_colour(None) == (0.0, 0.0, 0.0, 1.0)
 
-    def test_col_mapped_to_color(self):
-        gp = Gpar(col="red")
-        kw = _gpar_to_mpl(gp)
-        assert kw["color"] == "red"
+    def test_named_red(self):
+        r, g, b, a = _parse_colour("red")
+        assert r == 1.0 and g == 0.0 and b == 0.0 and a == 1.0
 
-    def test_fill_mapped_to_facecolor(self):
-        gp = Gpar(fill="blue")
-        kw = _gpar_to_mpl(gp)
-        assert kw["facecolor"] == "blue"
+    def test_hex_colour(self):
+        r, g, b, a = _parse_colour("#FF0000")
+        assert r == pytest.approx(1.0) and g == 0.0 and b == 0.0
 
-    def test_alpha(self):
-        gp = Gpar(alpha=0.5)
-        kw = _gpar_to_mpl(gp)
-        assert kw["alpha"] == pytest.approx(0.5)
+    def test_hex_with_alpha(self):
+        r, g, b, a = _parse_colour("#FF000080")
+        assert a == pytest.approx(128 / 255.0)
 
-    def test_lwd_mapped_to_linewidth(self):
-        gp = Gpar(lwd=2.5)
-        kw = _gpar_to_mpl(gp)
-        assert kw["linewidth"] == pytest.approx(2.5)
+    def test_grey_scale(self):
+        r, g, b, a = _parse_colour("grey50")
+        assert r == pytest.approx(0.5)
 
-    def test_lty_mapped_to_linestyle(self):
-        gp = Gpar(lty="dashed")
-        kw = _gpar_to_mpl(gp)
-        assert kw["linestyle"] == "dashed"
-
-    def test_fontsize(self):
-        gp = Gpar(fontsize=14)
-        kw = _gpar_to_mpl(gp)
-        assert kw["fontsize"] == pytest.approx(14.0)
-
-    def test_fontsize_with_cex(self):
-        gp = Gpar(fontsize=10, cex=2.0)
-        kw = _gpar_to_mpl(gp)
-        assert kw["fontsize"] == pytest.approx(20.0)
-
-    def test_fontfamily(self):
-        gp = Gpar(fontfamily="serif")
-        kw = _gpar_to_mpl(gp)
-        assert kw["fontfamily"] == "serif"
-
-    def test_bold_fontface(self):
-        """_gpar_to_mpl reads 'fontface' key; set it directly via _params."""
-        gp = Gpar()
-        gp._params["fontface"] = 2
-        kw = _gpar_to_mpl(gp)
-        assert kw.get("fontweight") == "bold"
-
-    def test_lineend_mapped(self):
-        gp = Gpar(lineend="round")
-        kw = _gpar_to_mpl(gp)
-        assert kw["solid_capstyle"] == "round"
-
-    def test_linejoin_mapped(self):
-        gp = Gpar(linejoin="bevel")
-        kw = _gpar_to_mpl(gp)
-        assert kw["solid_joinstyle"] == "bevel"
+    def test_transparent(self):
+        _, _, _, a = _parse_colour("transparent")
+        assert a == 0.0
