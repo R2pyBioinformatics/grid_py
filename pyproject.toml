@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grid_py"
-version = "0.1.0"
+version = "4.5.3-R4.5.3"
 description = "Python port of the R grid package"
 requires-python = ">=3.10"
 license = "Artistic-2.0"
