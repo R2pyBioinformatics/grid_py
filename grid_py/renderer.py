@@ -209,31 +209,184 @@ class CairoRenderer:
         self._ctx.set_source_rgba(*bg_rgba)
         self._ctx.paint()
 
+        # Viewport transform stack.  Each entry is (x0, y0, w, h) in
+        # device-unit space.  NPC [0,1] maps to [x0, x0+w] x [y0, y0+h].
+        if self._surface_type == "image":
+            self._vp_stack: list = [(0.0, 0.0, float(self._width_px), float(self._height_px))]
+        else:
+            self._vp_stack = [(0.0, 0.0, self.width_in * 72.0, self.height_in * 72.0)]
+        self._layout_stack: list = []  # GridLayout info stack
+        self._clip_stack: list = []   # Track which viewport pushes had clipping
+
+    # ---- viewport management -----------------------------------------------
+
+    def push_viewport(self, vp: Any) -> None:
+        """Push a viewport, updating the coordinate transform.
+
+        Handles three viewport types:
+        1. Layout viewport (has ``_layout`` with grid info) — stores grid
+        2. Child viewport with ``layout_pos_row/col`` — uses parent grid
+        3. Simple viewport with x/y/width/height — direct position
+        """
+        from ._units import Unit
+
+        x0, y0, pw, ph = self._vp_stack[-1]
+
+        layout = getattr(vp, "_layout", None)
+        layout_pos_row = getattr(vp, "_layout_pos_row", None)
+        layout_pos_col = getattr(vp, "_layout_pos_col", None)
+
+        if layout is not None:
+            # Layout viewport: same size as parent, but store grid info
+            grid_info = self._compute_grid(layout, pw, ph)
+            self._vp_stack.append((x0, y0, pw, ph))
+            self._layout_stack.append(grid_info)
+            self._clip_stack.append(False)
+            return
+
+        if layout_pos_row is not None and layout_pos_col is not None:
+            # Child of a layout viewport: compute cell position
+            if self._layout_stack:
+                grid = self._layout_stack[-1]
+                col_starts, col_widths = grid["col_starts"], grid["col_widths"]
+                row_starts, row_heights = grid["row_starts"], grid["row_heights"]
+
+                # layout_pos is 1-based (t, b) or single int
+                if isinstance(layout_pos_row, (list, tuple)):
+                    t, b = int(layout_pos_row[0]) - 1, int(layout_pos_row[1]) - 1
+                else:
+                    t = b = int(layout_pos_row) - 1
+                if isinstance(layout_pos_col, (list, tuple)):
+                    l, r = int(layout_pos_col[0]) - 1, int(layout_pos_col[1]) - 1
+                else:
+                    l = r = int(layout_pos_col) - 1
+
+                # Compute cell region
+                cell_x0 = x0 + (col_starts[l] if l < len(col_starts) else 0)
+                cell_y0 = y0 + (row_starts[t] if t < len(row_starts) else 0)
+                cell_w = sum(col_widths[l:r + 1]) if r < len(col_widths) else pw
+                cell_h = sum(row_heights[t:b + 1]) if b < len(row_heights) else ph
+
+                self._vp_stack.append((cell_x0, cell_y0, cell_w, cell_h))
+                self._apply_clip(vp, cell_x0, cell_y0, cell_w, cell_h)
+                return
+
+        # Simple viewport with explicit x/y/width/height
+        vp_x_raw = getattr(vp, "_x", None)
+        vp_y_raw = getattr(vp, "_y", None)
+        vp_w_raw = getattr(vp, "_width", None)
+        vp_h_raw = getattr(vp, "_height", None)
+
+        vp_x = float(vp_x_raw._values[0]) if vp_x_raw is not None and hasattr(vp_x_raw, "_values") else 0.5
+        vp_y = float(vp_y_raw._values[0]) if vp_y_raw is not None and hasattr(vp_y_raw, "_values") else 0.5
+        vp_w = float(vp_w_raw._values[0]) if vp_w_raw is not None and hasattr(vp_w_raw, "_values") else 1.0
+        vp_h = float(vp_h_raw._values[0]) if vp_h_raw is not None and hasattr(vp_h_raw, "_values") else 1.0
+
+        just = getattr(vp, "_just", (0.5, 0.5))
+        if isinstance(just, (list, tuple)) and len(just) >= 2:
+            hjust, vjust = float(just[0]), float(just[1])
+        else:
+            hjust, vjust = 0.5, 0.5
+
+        new_w = vp_w * pw
+        new_h = vp_h * ph
+        new_x0 = x0 + vp_x * pw - hjust * new_w
+        new_y0 = y0 + vp_y * ph - vjust * new_h
+
+        self._vp_stack.append((new_x0, new_y0, new_w, new_h))
+        self._apply_clip(vp, new_x0, new_y0, new_w, new_h)
+
+    def _apply_clip(self, vp: Any, x0: float, y0: float, w: float, h: float) -> None:
+        """Apply Cairo clipping rectangle if the viewport has clip=True/'on'."""
+        clip = getattr(vp, "_clip", None)
+        if clip is True or clip == "on":
+            self._ctx.save()
+            self._ctx.rectangle(x0, y0, w, h)
+            self._ctx.clip()
+            self._clip_stack.append(True)
+        else:
+            self._clip_stack.append(False)
+
+    def pop_viewport(self) -> None:
+        """Pop the current viewport and restore clipping state."""
+        if len(self._vp_stack) > 1:
+            self._vp_stack.pop()
+            if self._clip_stack:
+                had_clip = self._clip_stack.pop()
+                if had_clip:
+                    self._ctx.restore()
+
+    def _compute_grid(self, layout: Any, parent_w: float, parent_h: float) -> dict:
+        """Compute row/column positions for a GridLayout within the parent."""
+        nrow = getattr(layout, "nrow", 1)
+        ncol = getattr(layout, "ncol", 1)
+        widths = getattr(layout, "widths", None)
+        heights = getattr(layout, "heights", None)
+
+        col_widths = self._resolve_sizes(widths, ncol, parent_w)
+        row_heights = self._resolve_sizes(heights, nrow, parent_h)
+
+        col_starts = [sum(col_widths[:i]) for i in range(ncol)]
+        row_starts = [sum(row_heights[:i]) for i in range(nrow)]
+
+        return {
+            "col_starts": col_starts, "col_widths": col_widths,
+            "row_starts": row_starts, "row_heights": row_heights,
+        }
+
+    def _resolve_sizes(self, unit_obj: Any, n: int, total: float) -> list:
+        """Resolve a Unit vector to device sizes, distributing null units."""
+        if unit_obj is None:
+            return [total / n] * n
+
+        from ._units import Unit
+        if not isinstance(unit_obj, Unit):
+            return [total / n] * n
+
+        vals = unit_obj._values
+        types = unit_obj._types if hasattr(unit_obj, "_types") else ["null"] * len(vals)
+
+        # For null units, distribute proportionally
+        total_null = sum(v for v, t in zip(vals, types) if t == "null")
+        if total_null == 0:
+            total_null = 1.0
+
+        sizes = []
+        for v, t in zip(vals, types):
+            if t == "null":
+                sizes.append(float(v) / total_null * total)
+            elif t == "npc":
+                sizes.append(float(v) * total)
+            else:
+                sizes.append(float(v) / total_null * total)
+        return sizes
+
     # ---- coordinate helpers ------------------------------------------------
 
     def _x(self, npc: float) -> float:
-        """Convert NPC x → device x."""
-        if self._surface_type == "image":
-            return npc * self._width_px
-        return npc * self.width_in * 72.0
+        """Convert NPC x → device x (within current viewport)."""
+        x0, y0, pw, ph = self._vp_stack[-1]
+        return x0 + npc * pw
 
     def _y(self, npc: float) -> float:
-        """Convert NPC y → device y (Y-flip: 0=bottom, 1=top)."""
-        if self._surface_type == "image":
-            return (1.0 - npc) * self._height_px
-        return (1.0 - npc) * self.height_in * 72.0
+        """Convert NPC y → device y (Y-flip: 0=bottom, 1=top).
+
+        In Cairo device coords, y=0 is the top and increases downward.
+        In NPC, y=0 is the bottom and y=1 is the top.  Within a viewport
+        whose device-top is ``y0`` and device-height is ``ph``:
+          NPC 0 (bottom) → device ``y0 + ph``
+          NPC 1 (top)    → device ``y0``
+        """
+        x0, y0, pw, ph = self._vp_stack[-1]
+        return y0 + (1.0 - npc) * ph
 
     def _sx(self, npc: float) -> float:
         """Scale a width from NPC to device units."""
-        if self._surface_type == "image":
-            return npc * self._width_px
-        return npc * self.width_in * 72.0
+        return npc * self._vp_stack[-1][2]
 
     def _sy(self, npc: float) -> float:
         """Scale a height from NPC to device units."""
-        if self._surface_type == "image":
-            return npc * self._height_px
-        return npc * self.height_in * 72.0
+        return npc * self._vp_stack[-1][3]
 
     # ---- gpar application --------------------------------------------------
 
