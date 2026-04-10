@@ -479,13 +479,23 @@ class CairoRenderer:
         return rgba
 
     def _fill_rgba(
-        self, gp: Optional[Gpar],
+        self,
+        gp: Optional[Gpar],
+        bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> Union[Tuple[float, float, float, float], "cairo.Pattern"]:
         """Extract fill colour or gradient pattern from Gpar.
 
         Returns either an RGBA tuple for solid colours, or a
         ``cairo.LinearGradient`` / ``cairo.RadialGradient`` pattern
         for gradient fills.
+
+        Parameters
+        ----------
+        gp : Gpar or None
+            Graphical parameters.
+        bbox : tuple or None
+            Shape bounding box ``(x, y, w, h)`` in NPC, passed to
+            ``_setup_gradient`` for ``group=False`` resolution.
         """
         if gp is None:
             return (1.0, 1.0, 1.0, 1.0)
@@ -493,7 +503,7 @@ class CairoRenderer:
 
         # Handle gradient objects (LinearGradient / RadialGradient)
         if isinstance(fill, (LinearGradient, RadialGradient)):
-            return self._setup_gradient(fill, gp)
+            return self._setup_gradient(fill, gp, bbox=bbox)
 
         fill_val = fill[0] if isinstance(fill, (list, tuple)) else fill
         # R semantics: fill=NA (None) means "no fill" → transparent
@@ -502,7 +512,7 @@ class CairoRenderer:
 
         # Check if a scalar fill_val is a gradient object (not a string)
         if isinstance(fill_val, (LinearGradient, RadialGradient)):
-            return self._setup_gradient(fill_val, gp)
+            return self._setup_gradient(fill_val, gp, bbox=bbox)
 
         rgba = _parse_colour(fill_val)
 
@@ -516,11 +526,16 @@ class CairoRenderer:
         self,
         gradient: Union[LinearGradient, RadialGradient],
         gp: Optional[Gpar] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
     ) -> "cairo.Pattern":
         """Convert a grid gradient object to a cairo Pattern.
 
-        Resolves NPC coordinates to device coordinates using the current
-        viewport transform.
+        When ``gradient.group`` is ``True`` (default), coordinates are
+        resolved relative to the current viewport.  When ``False``,
+        coordinates are resolved relative to the shape's bounding box
+        given by *bbox* ``(x, y, w, h)`` in NPC.
+
+        Mirrors R's ``resolvePattern()`` in ``patterns.R:391-418``.
 
         Parameters
         ----------
@@ -528,6 +543,9 @@ class CairoRenderer:
             The gradient specification.
         gp : Gpar or None
             Graphical parameters (for alpha).
+        bbox : tuple of float or None
+            Shape bounding box ``(x, y, w, h)`` in NPC, used when
+            ``gradient.group is False``.
 
         Returns
         -------
@@ -541,27 +559,52 @@ class CairoRenderer:
             if a is not None:
                 gp_alpha = float(a[0] if isinstance(a, (list, tuple)) else a)
 
-        if isinstance(gradient, LinearGradient):
-            # Extract NPC values from Unit objects
-            x1_npc = float(gradient.x1.values[0])
-            y1_npc = float(gradient.y1.values[0])
-            x2_npc = float(gradient.x2.values[0])
-            y2_npc = float(gradient.y2.values[0])
+        # Determine coordinate mapping: viewport (group=True) or bbox (group=False)
+        use_bbox = (not gradient.group) and (bbox is not None)
 
-            # Convert to device coords
+        if isinstance(gradient, LinearGradient):
+            gx1 = float(gradient.x1.values[0])
+            gy1 = float(gradient.y1.values[0])
+            gx2 = float(gradient.x2.values[0])
+            gy2 = float(gradient.y2.values[0])
+
+            if use_bbox:
+                # Map gradient NPC coords to shape bbox
+                bx, by, bw, bh = bbox
+                x1_npc = bx + gx1 * bw
+                y1_npc = by + gy1 * bh
+                x2_npc = bx + gx2 * bw
+                y2_npc = by + gy2 * bh
+            else:
+                x1_npc, y1_npc = gx1, gy1
+                x2_npc, y2_npc = gx2, gy2
+
             pattern = cairo.LinearGradient(
                 self._x(x1_npc), self._y(y1_npc),
                 self._x(x2_npc), self._y(y2_npc),
             )
         elif isinstance(gradient, RadialGradient):
-            cx1_npc = float(gradient.cx1.values[0])
-            cy1_npc = float(gradient.cy1.values[0])
-            r1_npc = float(gradient.r1.values[0])
-            cx2_npc = float(gradient.cx2.values[0])
-            cy2_npc = float(gradient.cy2.values[0])
-            r2_npc = float(gradient.r2.values[0])
+            gcx1 = float(gradient.cx1.values[0])
+            gcy1 = float(gradient.cy1.values[0])
+            gr1 = float(gradient.r1.values[0])
+            gcx2 = float(gradient.cx2.values[0])
+            gcy2 = float(gradient.cy2.values[0])
+            gr2 = float(gradient.r2.values[0])
 
-            # Use average scale for radius
+            if use_bbox:
+                bx, by, bw, bh = bbox
+                cx1_npc = bx + gcx1 * bw
+                cy1_npc = by + gcy1 * bh
+                cx2_npc = bx + gcx2 * bw
+                cy2_npc = by + gcy2 * bh
+                # Scale radius by bbox size
+                r1_npc = gr1 * min(bw, bh)
+                r2_npc = gr2 * min(bw, bh)
+            else:
+                cx1_npc, cy1_npc = gcx1, gcy1
+                cx2_npc, cy2_npc = gcx2, gcy2
+                r1_npc, r2_npc = gr1, gr2
+
             r1_dev = (self._sx(r1_npc) + self._sy(r1_npc)) / 2.0
             r2_dev = (self._sx(r2_npc) + self._sy(r2_npc)) / 2.0
 
@@ -588,13 +631,25 @@ class CairoRenderer:
 
         return pattern
 
-    def _apply_fill(self, gp: Optional[Gpar]) -> bool:
+    def _apply_fill(
+        self,
+        gp: Optional[Gpar],
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> bool:
         """Apply fill (solid colour or gradient) to the current path.
+
+        Parameters
+        ----------
+        gp : Gpar or None
+            Graphical parameters.
+        bbox : tuple or None
+            Shape bounding box ``(x, y, w, h)`` in NPC for
+            ``group=False`` gradient resolution.
 
         Returns ``True`` if a fill was applied, ``False`` if transparent.
         """
         ctx = self._ctx
-        fill = self._fill_rgba(gp)
+        fill = self._fill_rgba(gp, bbox=bbox)
         if isinstance(fill, cairo.Pattern):
             ctx.set_source(fill)
             ctx.fill_preserve()
@@ -675,7 +730,9 @@ class CairoRenderer:
 
         ctx.rectangle(dx, dy, dw, dh)
 
-        self._apply_fill(gp)
+        # Compute bbox in NPC for group=False gradient resolution
+        bbox = (x0, y0, w, h)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -702,7 +759,9 @@ class CairoRenderer:
 
         ctx.arc(cx, cy, dr, 0, 2 * math.pi)
 
-        self._apply_fill(gp)
+        # Compute bbox in NPC for group=False gradient resolution
+        bbox = (x - r, y - r, 2 * r, 2 * r)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -812,7 +871,10 @@ class CairoRenderer:
             ctx.line_to(self._x(x[i]), self._y(y[i]))
         ctx.close_path()
 
-        self._apply_fill(gp)
+        # Compute bbox from polygon vertices
+        bbox = (float(np.min(x)), float(np.min(y)),
+                float(np.ptp(x)), float(np.ptp(y)))
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -850,7 +912,9 @@ class CairoRenderer:
                 ctx.line_to(self._x(px[i]), self._y(py[i]))
             ctx.close_path()
 
-        self._apply_fill(gp)
+        bbox = (float(np.min(x)), float(np.min(y)),
+                float(np.ptp(x)), float(np.ptp(y)))
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -1293,7 +1357,8 @@ class CairoRenderer:
             ctx.arc(dx + dr, dy + dr, dr, math.pi, 3 * math.pi / 2)
             ctx.close_path()
 
-        self._apply_fill(gp)
+        bbox = (x0, y0, w, h)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
