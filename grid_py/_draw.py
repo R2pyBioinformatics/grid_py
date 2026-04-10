@@ -45,6 +45,65 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+_HJUST_MAP = {"left": 0.0, "right": 1.0, "centre": 0.5, "center": 0.5}
+_VJUST_MAP = {"bottom": 0.0, "top": 1.0, "centre": 0.5, "center": 0.5}
+
+
+def _resolve_just(grob: Any) -> Tuple[float, float]:
+    """Resolve hjust/vjust from a grob, honouring the ``just`` attribute.
+
+    Matches R's ``valid.just()``: a single string like ``"right"`` sets
+    only the horizontal component (vjust defaults to 0.5), and
+    ``"top"`` sets only the vertical component (hjust defaults to 0.5).
+    A 2-element vector ``("left", "top")`` sets both.
+    """
+    hjust = getattr(grob, "hjust", None)
+    vjust = getattr(grob, "vjust", None)
+    if hjust is not None and vjust is not None:
+        return float(hjust), float(vjust)
+    just = getattr(grob, "just", None)
+    if just is not None:
+        if isinstance(just, str):
+            # Single string: "left"/"right" → hjust only;
+            # "top"/"bottom" → vjust only; "centre" → both
+            if just in _HJUST_MAP:
+                hj = _HJUST_MAP[just]
+                vj = _VJUST_MAP.get(just, 0.5)
+            elif just in _VJUST_MAP:
+                hj = _HJUST_MAP.get(just, 0.5)
+                vj = _VJUST_MAP[just]
+            else:
+                hj, vj = 0.5, 0.5
+        elif isinstance(just, (list, tuple)) and len(just) >= 2:
+            hj = _HJUST_MAP.get(just[0], 0.5) if isinstance(just[0], str) else float(just[0])
+            vj = _VJUST_MAP.get(just[1], 0.5) if isinstance(just[1], str) else float(just[1])
+        elif isinstance(just, (list, tuple)) and len(just) == 1:
+            hj = _HJUST_MAP.get(just[0], 0.5) if isinstance(just[0], str) else float(just[0])
+            vj = 0.5
+        else:
+            hj, vj = 0.5, 0.5
+        if hjust is None:
+            hjust = hj
+        if vjust is None:
+            vjust = vj
+    return float(hjust if hjust is not None else 0.5), float(vjust if vjust is not None else 0.5)
+
+
+def _subset_gpar(gp: Optional[Gpar], i: int) -> Optional[Gpar]:
+    """Return a Gpar containing only the *i*-th element of each vectorised param."""
+    if gp is None:
+        return None
+    new_params: Dict[str, Any] = {}
+    for key, val in gp.params.items():
+        if isinstance(val, np.ndarray) and val.ndim >= 1 and len(val) > 1:
+            new_params[key] = val[i % len(val)]
+        elif isinstance(val, (list, tuple)) and len(val) > 1:
+            new_params[key] = val[i % len(val)]
+        else:
+            new_params[key] = val
+    return Gpar(**new_params)
+
+
 def _unit_to_float(val: Any) -> float:
     """Extract a scalar float from a value that may be a Unit."""
     from ._units import Unit
@@ -95,15 +154,27 @@ def _render_grob(
 
     # ---- rect -----------------------------------------------------------
     if cls == "rect":
-        renderer.draw_rect(
-            x=_unit_to_float(getattr(grob, "x", 0.0)),
-            y=_unit_to_float(getattr(grob, "y", 0.0)),
-            w=_unit_to_float(getattr(grob, "width", 1.0)),
-            h=_unit_to_float(getattr(grob, "height", 1.0)),
-            hjust=float(getattr(grob, "hjust", None) or 0.5),
-            vjust=float(getattr(grob, "vjust", None) or 0.5),
-            gp=gp,
-        )
+        xs = _unit_to_array(getattr(grob, "x", [0.0]))
+        ys = _unit_to_array(getattr(grob, "y", [0.0]))
+        ws = _unit_to_array(getattr(grob, "width", [1.0]))
+        hs = _unit_to_array(getattr(grob, "height", [1.0]))
+        hj, vj = _resolve_just(grob)
+        n = max(len(xs), len(ys), len(ws), len(hs))
+        if len(xs) == 1:
+            xs = np.full(n, xs[0])
+        if len(ys) == 1:
+            ys = np.full(n, ys[0])
+        if len(ws) == 1:
+            ws = np.full(n, ws[0])
+        if len(hs) == 1:
+            hs = np.full(n, hs[0])
+        for i in range(n):
+            gp_i = _subset_gpar(gp, i) if n > 1 else gp
+            renderer.draw_rect(
+                x=float(xs[i]), y=float(ys[i]),
+                w=float(ws[i]), h=float(hs[i]),
+                hjust=hj, vjust=vj, gp=gp_i,
+            )
 
     # ---- roundrect ------------------------------------------------------
     elif cls == "roundrect":
@@ -156,13 +227,14 @@ def _render_grob(
 
     # ---- text ------------------------------------------------------------
     elif cls == "text":
+        hj, vj = _resolve_just(grob)
         renderer.draw_text(
             x=_unit_to_float(getattr(grob, "x", 0.5)),
             y=_unit_to_float(getattr(grob, "y", 0.5)),
             label=getattr(grob, "label", ""),
             rot=float(getattr(grob, "rot", 0.0)),
-            hjust=float(getattr(grob, "hjust", None) or 0.5),
-            vjust=float(getattr(grob, "vjust", None) or 0.5),
+            hjust=hj,
+            vjust=vj,
             gp=gp,
         )
 
@@ -207,8 +279,8 @@ def _render_grob(
                 interpolate=getattr(grob, "interpolate", True),
             )
 
-    # ---- null / no-op ---------------------------------------------------
-    elif cls == "null":
+    # ---- null / gTree / base grob – no-op --------------------------------
+    elif cls in ("null", "grob", "gTree"):
         pass
 
     # ---- move.to / line.to -----------------------------------------------
@@ -240,6 +312,9 @@ def _render_grob(
 def _push_grob_vp(vp: Any) -> None:
     """Push a grob's viewport (or navigate down for a VpPath).
 
+    Also updates the renderer's coordinate transform so that NPC [0,1]
+    maps to the viewport's sub-region, matching R's grid semantics.
+
     Parameters
     ----------
     vp : Viewport or VpPath
@@ -253,9 +328,17 @@ def _push_grob_vp(vp: Any) -> None:
     else:
         push_viewport(vp, recording=False)
 
+    # Update renderer coordinate transform
+    state = get_state()
+    renderer = state.get_renderer()
+    if renderer is not None and hasattr(renderer, "push_viewport"):
+        renderer.push_viewport(vp)
+
 
 def _pop_grob_vp(vp: Any) -> None:
     """Pop/navigate up from a grob's viewport.
+
+    Also restores the renderer's coordinate transform.
 
     Parameters
     ----------
@@ -267,6 +350,13 @@ def _pop_grob_vp(vp: Any) -> None:
 
     d = _vp_depth(vp)
     up_viewport(d, recording=False)
+
+    # Restore renderer coordinate transform
+    state = get_state()
+    renderer = state.get_renderer()
+    if renderer is not None and hasattr(renderer, "pop_viewport"):
+        for _ in range(d):
+            renderer.pop_viewport()
 
 
 def _vp_depth(vp: Any) -> int:
