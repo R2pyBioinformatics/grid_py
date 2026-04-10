@@ -21,6 +21,7 @@ from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from ._gpar import Gpar
+from ._display_list import DisplayList
 
 __all__ = ["GridState", "get_state"]
 
@@ -204,7 +205,7 @@ class GridState:
         """Set every slot to its default value."""
         self._vp_tree: Any = _make_root_viewport()
         self._current_vp: Any = self._vp_tree
-        self._display_list: List[Any] = []
+        self._display_list: DisplayList = DisplayList()
         self._dl_on: bool = True
         self._gpar_stack: List[Gpar] = [Gpar()]
         self._device_width_cm: float = _DEFAULT_DEVICE_WIDTH_CM
@@ -492,6 +493,27 @@ class GridState:
 
     # ---- display list -----------------------------------------------------
 
+    @property
+    def display_list(self) -> DisplayList:
+        """Return the current :class:`DisplayList` object.
+
+        Returns
+        -------
+        DisplayList
+        """
+        return self._display_list
+
+    @display_list.setter
+    def display_list(self, value: DisplayList) -> None:
+        """Replace the current display list.
+
+        Parameters
+        ----------
+        value : DisplayList
+            The new display list.
+        """
+        self._display_list = value
+
     def record(self, op: Any) -> None:
         """Append an operation to the display list (if recording is on).
 
@@ -501,14 +523,14 @@ class GridState:
             A drawable / grob operation.
         """
         if self._dl_on:
-            self._display_list.append(op)
+            self._display_list.record(op)
 
-    def get_display_list(self) -> List[Any]:
+    def get_display_list(self) -> DisplayList:
         """Return the current display list.
 
         Returns
         -------
-        list[Any]
+        DisplayList
         """
         return self._display_list
 

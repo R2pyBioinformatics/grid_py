@@ -162,6 +162,26 @@ class DisplayList:
         """
         return [fn(item) for item in self._items]
 
+    def extend(self, items: List[DLOperation]) -> None:
+        """Append every element of *items* to the display list.
+
+        Parameters
+        ----------
+        items : list[DLOperation]
+            Operations to add.
+        """
+        self._items.extend(items)
+
+    def append(self, item: DLOperation) -> None:
+        """Unconditionally append *item* (ignores enabled flag).
+
+        Parameters
+        ----------
+        item : DLOperation
+            Operation to add.
+        """
+        self._items.append(item)
+
     # -- dunder protocols ----------------------------------------------------
 
     def __len__(self) -> int:
@@ -185,6 +205,10 @@ class DisplayList:
         DLOperation
         """
         return self._items[i]
+
+    def __contains__(self, item: Any) -> bool:
+        """Return ``True`` if *item* is in the display list."""
+        return item in self._items
 
     def __repr__(self) -> str:  # pragma: no cover
         return (

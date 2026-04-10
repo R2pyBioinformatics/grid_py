@@ -269,7 +269,8 @@ class TestDisplayList:
     def test_get_display_list(self):
         state = get_state()
         dl = state.get_display_list()
-        assert isinstance(dl, list)
+        # DisplayList is a list-like container
+        assert hasattr(dl, '__len__') and hasattr(dl, '__iter__')
 
 
 class TestDeviceBinding:
