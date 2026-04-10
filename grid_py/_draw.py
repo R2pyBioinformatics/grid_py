@@ -250,13 +250,18 @@ def _render_grob(
     # ---- points ----------------------------------------------------------
     elif cls == "points":
         pch_raw = getattr(grob, "pch", 19)
-        if hasattr(pch_raw, "__len__"):
-            pch_raw = pch_raw[0] if len(pch_raw) > 0 else 19
+        # pch may be a scalar or per-point array — pass through as-is
+        if isinstance(pch_raw, (np.ndarray, list, tuple)):
+            pch_val = np.asarray(pch_raw, dtype=int)
+        elif isinstance(pch_raw, (int, float, np.integer, np.floating)):
+            pch_val = int(pch_raw)
+        else:
+            pch_val = 19
         renderer.draw_points(
             x=_unit_to_array(getattr(grob, "x", [])),
             y=_unit_to_array(getattr(grob, "y", [])),
             size=_unit_to_float(getattr(grob, "size", 1.0)),
-            pch=int(pch_raw),
+            pch=pch_val,
             gp=gp,
         )
 

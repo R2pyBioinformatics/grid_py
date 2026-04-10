@@ -798,53 +798,306 @@ class CairoRenderer:
         ctx.show_text(str(label))
         ctx.restore()
 
+    # ------------------------------------------------------------------ #
+    #  pch shape path helpers (R pch 0-25)                                #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _pch_path_circle(ctx: Any, cx: float, cy: float, r: float) -> None:
+        ctx.arc(cx, cy, r, 0, 2 * math.pi)
+
+    @staticmethod
+    def _pch_path_square(ctx: Any, cx: float, cy: float, r: float) -> None:
+        ctx.rectangle(cx - r, cy - r, 2 * r, 2 * r)
+
+    @staticmethod
+    def _pch_path_triangle_up(ctx: Any, cx: float, cy: float, r: float) -> None:
+        h = r * 1.2  # slightly taller for visual balance
+        ctx.move_to(cx, cy - h)
+        ctx.line_to(cx - h, cy + h * 0.7)
+        ctx.line_to(cx + h, cy + h * 0.7)
+        ctx.close_path()
+
+    @staticmethod
+    def _pch_path_triangle_down(ctx: Any, cx: float, cy: float, r: float) -> None:
+        h = r * 1.2
+        ctx.move_to(cx, cy + h)
+        ctx.line_to(cx - h, cy - h * 0.7)
+        ctx.line_to(cx + h, cy - h * 0.7)
+        ctx.close_path()
+
+    @staticmethod
+    def _pch_path_diamond(ctx: Any, cx: float, cy: float, r: float) -> None:
+        ctx.move_to(cx, cy - r)
+        ctx.line_to(cx + r, cy)
+        ctx.line_to(cx, cy + r)
+        ctx.line_to(cx - r, cy)
+        ctx.close_path()
+
+    @staticmethod
+    def _pch_path_plus(ctx: Any, cx: float, cy: float, r: float) -> None:
+        ctx.move_to(cx - r, cy)
+        ctx.line_to(cx + r, cy)
+        ctx.move_to(cx, cy - r)
+        ctx.line_to(cx, cy + r)
+
+    @staticmethod
+    def _pch_path_cross(ctx: Any, cx: float, cy: float, r: float) -> None:
+        d = r * 0.707  # r / sqrt(2)
+        ctx.move_to(cx - d, cy - d)
+        ctx.line_to(cx + d, cy + d)
+        ctx.move_to(cx - d, cy + d)
+        ctx.line_to(cx + d, cy - d)
+
+    @staticmethod
+    def _pch_path_asterisk(ctx: Any, cx: float, cy: float, r: float) -> None:
+        """6-armed asterisk (pch 8)."""
+        for angle_deg in (0, 60, 120):
+            a = math.radians(angle_deg)
+            dx = r * math.cos(a)
+            dy = r * math.sin(a)
+            ctx.move_to(cx - dx, cy - dy)
+            ctx.line_to(cx + dx, cy + dy)
+
+    @staticmethod
+    def _pch_path_star(ctx: Any, cx: float, cy: float, r: float) -> None:
+        """5-pointed star outline (pch 11) – two overlaid triangles."""
+        h = r * 1.2
+        # up triangle
+        ctx.move_to(cx, cy - h)
+        ctx.line_to(cx - h, cy + h * 0.7)
+        ctx.line_to(cx + h, cy + h * 0.7)
+        ctx.close_path()
+        # down triangle
+        ctx.move_to(cx, cy + h)
+        ctx.line_to(cx - h, cy - h * 0.7)
+        ctx.line_to(cx + h, cy - h * 0.7)
+        ctx.close_path()
+
+    def _draw_pch_shape(
+        self,
+        ctx: Any,
+        pch_val: int,
+        cx: float,
+        cy: float,
+        r: float,
+        col_rgba: Tuple[float, float, float, float],
+        fill_rgba: Tuple[float, float, float, float],
+        lwd: float,
+    ) -> None:
+        """Draw a single R pch shape at (*cx*, *cy*) with radius *r*.
+
+        Follows R semantics for pch groups:
+        - 0-14 : open / line-only shapes — stroke with *col*, no fill
+        - 15-18: solid filled shapes — both stroke and fill use *col*
+        - 19-20: filled circles — fill and stroke use *col*
+        - 21-25: filled shapes with separate fill and col
+        """
+        ctx.save()
+        ctx.new_path()  # clear any residual path from prior draws
+        ctx.set_line_width(lwd)
+
+        if pch_val <= 14:
+            # --- Group 0-14: stroke-only (use col for outline, no fill) ---
+            if pch_val == 0:                       # square open
+                self._pch_path_square(ctx, cx, cy, r)
+            elif pch_val == 1:                     # circle open
+                self._pch_path_circle(ctx, cx, cy, r)
+            elif pch_val == 2:                     # triangle open
+                self._pch_path_triangle_up(ctx, cx, cy, r)
+            elif pch_val == 3:                     # plus
+                self._pch_path_plus(ctx, cx, cy, r)
+            elif pch_val == 4:                     # cross (×)
+                self._pch_path_cross(ctx, cx, cy, r)
+            elif pch_val == 5:                     # diamond open
+                self._pch_path_diamond(ctx, cx, cy, r)
+            elif pch_val == 6:                     # triangle down open
+                self._pch_path_triangle_down(ctx, cx, cy, r)
+            elif pch_val == 7:                     # square cross
+                self._pch_path_square(ctx, cx, cy, r)
+                self._pch_path_cross(ctx, cx, cy, r)
+            elif pch_val == 8:                     # asterisk
+                self._pch_path_asterisk(ctx, cx, cy, r)
+            elif pch_val == 9:                     # diamond plus
+                self._pch_path_diamond(ctx, cx, cy, r)
+                self._pch_path_plus(ctx, cx, cy, r)
+            elif pch_val == 10:                    # circle plus
+                self._pch_path_circle(ctx, cx, cy, r)
+                self._pch_path_plus(ctx, cx, cy, r)
+            elif pch_val == 11:                    # star (two triangles)
+                self._pch_path_star(ctx, cx, cy, r)
+            elif pch_val == 12:                    # square plus
+                self._pch_path_square(ctx, cx, cy, r)
+                self._pch_path_plus(ctx, cx, cy, r)
+            elif pch_val == 13:                    # circle cross
+                self._pch_path_circle(ctx, cx, cy, r)
+                self._pch_path_cross(ctx, cx, cy, r)
+            elif pch_val == 14:                    # square triangle
+                self._pch_path_square(ctx, cx, cy, r)
+                self._pch_path_triangle_up(ctx, cx, cy, r)
+
+            if col_rgba[3] > 0:
+                ctx.set_source_rgba(*col_rgba)
+                ctx.stroke()
+            else:
+                ctx.new_path()
+
+        elif pch_val <= 20:
+            # --- Group 15-20: solid filled — col used for both fill & stroke ---
+            if pch_val == 15:                      # square
+                self._pch_path_square(ctx, cx, cy, r)
+            elif pch_val == 16:                    # circle small
+                self._pch_path_circle(ctx, cx, cy, r * 0.75)
+            elif pch_val == 17:                    # triangle
+                self._pch_path_triangle_up(ctx, cx, cy, r)
+            elif pch_val == 18:                    # diamond
+                self._pch_path_diamond(ctx, cx, cy, r)
+            elif pch_val == 19:                    # circle (default)
+                self._pch_path_circle(ctx, cx, cy, r)
+            elif pch_val == 20:                    # bullet (small)
+                self._pch_path_circle(ctx, cx, cy, r * 0.6)
+
+            if col_rgba[3] > 0:
+                ctx.set_source_rgba(*col_rgba)
+                ctx.fill_preserve()
+                ctx.set_source_rgba(*col_rgba)
+                ctx.stroke()
+            else:
+                ctx.new_path()
+
+        else:
+            # --- Group 21-25: separate fill and col (stroke) ---
+            if pch_val == 21:                      # circle filled
+                self._pch_path_circle(ctx, cx, cy, r)
+            elif pch_val == 22:                    # square filled
+                self._pch_path_square(ctx, cx, cy, r)
+            elif pch_val == 23:                    # diamond filled
+                self._pch_path_diamond(ctx, cx, cy, r)
+            elif pch_val == 24:                    # triangle filled
+                self._pch_path_triangle_up(ctx, cx, cy, r)
+            elif pch_val == 25:                    # triangle down filled
+                self._pch_path_triangle_down(ctx, cx, cy, r)
+            else:
+                # fallback: circle
+                self._pch_path_circle(ctx, cx, cy, r)
+
+            if fill_rgba[3] > 0:
+                ctx.set_source_rgba(*fill_rgba)
+                ctx.fill_preserve()
+            else:
+                ctx.new_path()
+                # re-draw path for stroke
+                if pch_val == 21:
+                    self._pch_path_circle(ctx, cx, cy, r)
+                elif pch_val == 22:
+                    self._pch_path_square(ctx, cx, cy, r)
+                elif pch_val == 23:
+                    self._pch_path_diamond(ctx, cx, cy, r)
+                elif pch_val == 24:
+                    self._pch_path_triangle_up(ctx, cx, cy, r)
+                elif pch_val == 25:
+                    self._pch_path_triangle_down(ctx, cx, cy, r)
+                else:
+                    self._pch_path_circle(ctx, cx, cy, r)
+
+            if col_rgba[3] > 0:
+                ctx.set_source_rgba(*col_rgba)
+                ctx.stroke()
+            else:
+                ctx.new_path()
+
+        ctx.restore()
+
     def draw_points(
         self,
         x: np.ndarray,
         y: np.ndarray,
         size: float = 1.0,
-        pch: int = 19,
+        pch: Any = 19,
         gp: Optional[Gpar] = None,
     ) -> None:
-        """Draw point markers.  Currently renders filled circles (pch 19)."""
+        """Draw point markers with full R pch 0-25 support.
+
+        Parameters
+        ----------
+        x, y : array-like
+            Point coordinates in NPC.
+        size : float
+            Fallback symbol size (used when ``gp.fontsize`` is absent).
+        pch : int, array-like of int
+            Plotting character code(s).  Scalar → same shape for all points;
+            array → per-point shapes.
+        gp : Gpar or None
+            Graphical parameters (col, fill, fontsize, lwd, …).
+        """
         ctx = self._ctx
         ctx.save()
 
-        # Size: approximate pt-to-device scaling
-        if self._surface_type == "image":
-            r = size * self.dpi / 72.0 * 0.5
+        n = len(x)
+        if n == 0:
+            ctx.restore()
+            return
+
+        # --- per-point pch array ---
+        if isinstance(pch, (list, tuple, np.ndarray)):
+            pch_arr = np.asarray(pch, dtype=int)
         else:
-            r = size * 0.5
+            pch_arr = np.full(n, int(pch), dtype=int)
+        if len(pch_arr) < n:
+            pch_arr = np.resize(pch_arr, n)
 
-        fill = self._fill_rgba(gp)
-        stroke_rgba = self._apply_stroke(gp)
+        # --- per-point sizes from gpar.fontsize (R: cex * fontsize) ---
+        fs = gp.get("fontsize", None) if gp else None
+        if isinstance(fs, (list, tuple, np.ndarray)):
+            size_arr = np.asarray(fs, dtype=float)
+        elif fs is not None:
+            size_arr = np.full(n, float(fs))
+        else:
+            size_arr = np.full(n, float(size))
 
-        # Handle per-point colours
-        col = gp.get("col", None) if gp else None
-        col_list: Optional[list] = None
-        if isinstance(col, (list, tuple, np.ndarray)) and len(col) == len(x):
-            col_list = [_parse_colour(c) for c in col]
+        # Radius conversion: fontsize (pt) → device pixels
+        scale = self.dpi / 72.0 * 0.5 if self._surface_type == "image" else 0.5
 
-        for i in range(len(x)):
+        # --- per-point colours (col) ---
+        col_raw = gp.get("col", None) if gp else None
+        if isinstance(col_raw, (list, tuple, np.ndarray)) and len(col_raw) >= n:
+            col_list = [_parse_colour(c) for c in col_raw[:n]]
+        elif col_raw is not None:
+            c0 = _parse_colour(col_raw[0] if isinstance(col_raw, (list, tuple)) else col_raw)
+            col_list = [c0] * n
+        else:
+            col_list = [(0.0, 0.0, 0.0, 1.0)] * n
+
+        # --- per-point fill colours ---
+        fill_raw = gp.get("fill", None) if gp else None
+        if isinstance(fill_raw, (list, tuple, np.ndarray)) and len(fill_raw) >= n:
+            fill_list = [_parse_colour(c) for c in fill_raw[:n]]
+        elif fill_raw is not None:
+            f0 = _parse_colour(fill_raw[0] if isinstance(fill_raw, (list, tuple)) else fill_raw)
+            fill_list = [f0] * n
+        else:
+            fill_list = [(0.0, 0.0, 0.0, 0.0)] * n
+
+        # --- per-point lwd ---
+        lwd_raw = gp.get("lwd", None) if gp else None
+        if isinstance(lwd_raw, (list, tuple, np.ndarray)):
+            lwd_arr = np.asarray(lwd_raw, dtype=float)
+        elif lwd_raw is not None:
+            lwd_arr = np.full(n, float(lwd_raw))
+        else:
+            lwd_arr = np.full(n, 1.0)
+
+        for i in range(n):
             cx = self._x(x[i])
             cy = self._y(y[i])
-            ctx.arc(cx, cy, r, 0, 2 * math.pi)
-
-            if col_list is not None:
-                c = col_list[i]
-                ctx.set_source_rgba(*c)
-                ctx.fill_preserve()
-                ctx.set_source_rgba(*c)
-                ctx.stroke()
-            else:
-                if fill[3] > 0:
-                    ctx.set_source_rgba(*fill)
-                    ctx.fill_preserve()
-                if stroke_rgba[3] > 0:
-                    ctx.set_source_rgba(*stroke_rgba)
-                    ctx.stroke()
-                else:
-                    ctx.new_path()
+            r = size_arr[i] * scale if i < len(size_arr) else size * scale
+            lwd_i = float(lwd_arr[i % len(lwd_arr)])
+            self._draw_pch_shape(
+                ctx, int(pch_arr[i]), cx, cy, r,
+                col_rgba=col_list[i],
+                fill_rgba=fill_list[i],
+                lwd=lwd_i,
+            )
 
         ctx.restore()
 
