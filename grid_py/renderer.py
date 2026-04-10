@@ -26,6 +26,7 @@ except ImportError:
     )
 
 from ._gpar import Gpar
+from ._patterns import LinearGradient, RadialGradient
 
 __all__ = ["CairoRenderer"]
 
@@ -477,15 +478,32 @@ class CairoRenderer:
 
         return rgba
 
-    def _fill_rgba(self, gp: Optional[Gpar]) -> Tuple[float, float, float, float]:
-        """Extract fill colour from Gpar."""
+    def _fill_rgba(
+        self, gp: Optional[Gpar],
+    ) -> Union[Tuple[float, float, float, float], "cairo.Pattern"]:
+        """Extract fill colour or gradient pattern from Gpar.
+
+        Returns either an RGBA tuple for solid colours, or a
+        ``cairo.LinearGradient`` / ``cairo.RadialGradient`` pattern
+        for gradient fills.
+        """
         if gp is None:
             return (1.0, 1.0, 1.0, 1.0)
         fill = gp.get("fill", None)
+
+        # Handle gradient objects (LinearGradient / RadialGradient)
+        if isinstance(fill, (LinearGradient, RadialGradient)):
+            return self._setup_gradient(fill, gp)
+
         fill_val = fill[0] if isinstance(fill, (list, tuple)) else fill
         # R semantics: fill=NA (None) means "no fill" → transparent
         if fill_val is None:
             return (0.0, 0.0, 0.0, 0.0)
+
+        # Check if a scalar fill_val is a gradient object (not a string)
+        if isinstance(fill_val, (LinearGradient, RadialGradient)):
+            return self._setup_gradient(fill_val, gp)
+
         rgba = _parse_colour(fill_val)
 
         alpha = gp.get("alpha", None)
@@ -493,6 +511,99 @@ class CairoRenderer:
             a = float(alpha[0] if isinstance(alpha, (list, tuple)) else alpha)
             rgba = (rgba[0], rgba[1], rgba[2], rgba[3] * a)
         return rgba
+
+    def _setup_gradient(
+        self,
+        gradient: Union[LinearGradient, RadialGradient],
+        gp: Optional[Gpar] = None,
+    ) -> "cairo.Pattern":
+        """Convert a grid gradient object to a cairo Pattern.
+
+        Resolves NPC coordinates to device coordinates using the current
+        viewport transform.
+
+        Parameters
+        ----------
+        gradient : LinearGradient or RadialGradient
+            The gradient specification.
+        gp : Gpar or None
+            Graphical parameters (for alpha).
+
+        Returns
+        -------
+        cairo.Pattern
+            A cairo linear or radial gradient pattern.
+        """
+        # Get alpha from gpar
+        gp_alpha = 1.0
+        if gp is not None:
+            a = gp.get("alpha", None)
+            if a is not None:
+                gp_alpha = float(a[0] if isinstance(a, (list, tuple)) else a)
+
+        if isinstance(gradient, LinearGradient):
+            # Extract NPC values from Unit objects
+            x1_npc = float(gradient.x1.values[0])
+            y1_npc = float(gradient.y1.values[0])
+            x2_npc = float(gradient.x2.values[0])
+            y2_npc = float(gradient.y2.values[0])
+
+            # Convert to device coords
+            pattern = cairo.LinearGradient(
+                self._x(x1_npc), self._y(y1_npc),
+                self._x(x2_npc), self._y(y2_npc),
+            )
+        elif isinstance(gradient, RadialGradient):
+            cx1_npc = float(gradient.cx1.values[0])
+            cy1_npc = float(gradient.cy1.values[0])
+            r1_npc = float(gradient.r1.values[0])
+            cx2_npc = float(gradient.cx2.values[0])
+            cy2_npc = float(gradient.cy2.values[0])
+            r2_npc = float(gradient.r2.values[0])
+
+            # Use average scale for radius
+            r1_dev = (self._sx(r1_npc) + self._sy(r1_npc)) / 2.0
+            r2_dev = (self._sx(r2_npc) + self._sy(r2_npc)) / 2.0
+
+            pattern = cairo.RadialGradient(
+                self._x(cx1_npc), self._y(cy1_npc), r1_dev,
+                self._x(cx2_npc), self._y(cy2_npc), r2_dev,
+            )
+        else:
+            return (0.0, 0.0, 0.0, 0.0)
+
+        # Add colour stops
+        for colour_str, stop in zip(gradient.colours, gradient.stops):
+            r, g, b, a = _parse_colour(colour_str)
+            pattern.add_color_stop_rgba(stop, r, g, b, a * gp_alpha)
+
+        # Set extend mode
+        extend_map = {
+            "pad": cairo.EXTEND_PAD,
+            "repeat": cairo.EXTEND_REPEAT,
+            "reflect": cairo.EXTEND_REFLECT,
+            "none": cairo.EXTEND_NONE,
+        }
+        pattern.set_extend(extend_map.get(gradient.extend, cairo.EXTEND_PAD))
+
+        return pattern
+
+    def _apply_fill(self, gp: Optional[Gpar]) -> bool:
+        """Apply fill (solid colour or gradient) to the current path.
+
+        Returns ``True`` if a fill was applied, ``False`` if transparent.
+        """
+        ctx = self._ctx
+        fill = self._fill_rgba(gp)
+        if isinstance(fill, cairo.Pattern):
+            ctx.set_source(fill)
+            ctx.fill_preserve()
+            return True
+        elif isinstance(fill, tuple) and fill[3] > 0:
+            ctx.set_source_rgba(*fill)
+            ctx.fill_preserve()
+            return True
+        return False
 
     def _set_font(self, gp: Optional[Gpar]) -> float:
         """Configure font on context from Gpar.  Returns font size in device units."""
@@ -564,10 +675,7 @@ class CairoRenderer:
 
         ctx.rectangle(dx, dy, dw, dh)
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        self._apply_fill(gp)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -594,10 +702,7 @@ class CairoRenderer:
 
         ctx.arc(cx, cy, dr, 0, 2 * math.pi)
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        self._apply_fill(gp)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -707,10 +812,7 @@ class CairoRenderer:
             ctx.line_to(self._x(x[i]), self._y(y[i]))
         ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        self._apply_fill(gp)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -748,10 +850,7 @@ class CairoRenderer:
                 ctx.line_to(self._x(px[i]), self._y(py[i]))
             ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        self._apply_fill(gp)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -1194,10 +1293,7 @@ class CairoRenderer:
             ctx.arc(dx + dr, dy + dr, dr, math.pi, 3 * math.pi / 2)
             ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        self._apply_fill(gp)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
