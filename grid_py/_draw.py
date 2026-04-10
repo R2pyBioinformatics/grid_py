@@ -219,11 +219,20 @@ def _render_grob(
 
     # ---- polygon ---------------------------------------------------------
     elif cls == "polygon":
-        renderer.draw_polygon(
-            x=_unit_to_array(getattr(grob, "x", [])),
-            y=_unit_to_array(getattr(grob, "y", [])),
-            gp=gp,
-        )
+        px = _unit_to_array(getattr(grob, "x", []))
+        py = _unit_to_array(getattr(grob, "y", []))
+        pid = getattr(grob, "id", None)
+        if pid is not None:
+            # R semantics: polygonGrob(id=...) draws separate polygons
+            # per unique id value, each with its own fill/stroke.
+            pid = np.atleast_1d(np.asarray(pid))
+            unique_ids = np.unique(pid)
+            for idx, uid in enumerate(unique_ids):
+                mask = pid == uid
+                gp_i = _subset_gpar(gp, idx) if gp else gp
+                renderer.draw_polygon(px[mask], py[mask], gp=gp_i)
+        else:
+            renderer.draw_polygon(px, py, gp=gp)
 
     # ---- text ------------------------------------------------------------
     elif cls == "text":

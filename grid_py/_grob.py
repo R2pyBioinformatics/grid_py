@@ -587,15 +587,28 @@ class GTree(Grob):
     # -- internal helpers --------------------------------------------------
 
     def _set_children_internal(self, children: Optional[GList]) -> None:
-        """Populate children dict and order from a GList."""
+        """Populate children dict and order from a GList.
+
+        Duplicate names are disambiguated with numeric suffixes
+        (matching R's gTree behaviour).
+        """
         if children is not None and not isinstance(children, GList):
             raise TypeError("'children' must be a GList or None")
         self._children = OrderedDict()
         self._children_order = []
         if children is not None:
-            # Filter out Nones (shouldn't be in GList, but be safe)
+            name_counts: dict = {}
             for child in children:
                 if child is not None:
+                    base = child.name
+                    if base in self._children:
+                        count = name_counts.get(base, 1)
+                        while f"{base}.{count}" in self._children:
+                            count += 1
+                        name_counts[base] = count + 1
+                        unique_name = f"{base}.{count}"
+                        child = copy.copy(child)
+                        child._name = unique_name
                     self._children[child.name] = child
                     self._children_order.append(child.name)
 
