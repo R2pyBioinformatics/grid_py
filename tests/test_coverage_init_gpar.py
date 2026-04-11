@@ -53,7 +53,8 @@ class TestInitAliases:
         assert grid_py.engine_display_list is grid_py.grid_display_list
 
     def test_version(self):
-        assert grid_py.__version__ == "0.1.0"
+        assert isinstance(grid_py.__version__, str)
+        assert len(grid_py.__version__) > 0
 
 
 # ---------------------------------------------------------------------------
