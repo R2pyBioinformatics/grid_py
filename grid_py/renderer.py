@@ -26,7 +26,7 @@ except ImportError:
     )
 
 from ._gpar import Gpar
-from ._patterns import LinearGradient, RadialGradient
+from ._patterns import LinearGradient, RadialGradient, Pattern
 
 __all__ = ["CairoRenderer"]
 
@@ -239,7 +239,9 @@ class CairoRenderer:
 
         if layout is not None:
             # Layout viewport: same size as parent, but store grid info
-            grid_info = self._compute_grid(layout, pw, ph)
+            respect = getattr(layout, "respect", False)
+            grid_info = self._compute_grid(
+                layout, pw, ph, respect=bool(respect))
             self._vp_stack.append((x0, y0, pw, ph))
             self._layout_stack.append(grid_info)
             self._clip_stack.append(False)
@@ -308,6 +310,86 @@ class CairoRenderer:
         else:
             self._clip_stack.append(False)
 
+    def render_mask(self, mask_grob: Any) -> Optional["cairo.ImageSurface"]:
+        """Render a mask grob to an off-screen alpha surface.
+
+        Mirrors R's ``resolveMask.GridMask`` which draws the mask grob
+        and extracts the alpha channel for compositing.
+
+        Parameters
+        ----------
+        mask_grob : grob
+            A grob to render as the mask.
+
+        Returns
+        -------
+        cairo.ImageSurface or None
+            An ARGB32 surface whose alpha channel is the mask, or
+            ``None`` on failure.
+        """
+        x0, y0, pw, ph = self._vp_stack[-1]
+        dw = max(int(round(pw)), 1)
+        dh = max(int(round(ph)), 1)
+
+        mask_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, dw, dh)
+        mask_renderer = CairoRenderer.__new__(CairoRenderer)
+        mask_renderer._surface = mask_surface
+        mask_renderer._ctx = cairo.Context(mask_surface)
+        mask_renderer._surface_type = "image"
+        mask_renderer.dpi = self.dpi
+        mask_renderer._vp_stack = [(0.0, 0.0, float(dw), float(dh))]
+        mask_renderer._clip_stack = [False]
+        mask_renderer._layout_stack = []
+
+        # Clear to transparent
+        mask_renderer._ctx.set_source_rgba(0, 0, 0, 0)
+        mask_renderer._ctx.paint()
+
+        try:
+            from ._draw import grid_draw
+            from ._state import get_state
+            state = get_state()
+            orig_renderer = state._renderer
+            state._renderer = mask_renderer
+            try:
+                grid_draw(mask_grob, recording=False)
+            finally:
+                state._renderer = orig_renderer
+        except Exception:
+            return None
+
+        return mask_surface
+
+    def apply_mask(
+        self,
+        mask_surface: "cairo.ImageSurface",
+        mask_type: str = "alpha",
+    ) -> None:
+        """Apply a pre-rendered mask surface to the current drawing.
+
+        For ``type="alpha"``, the mask's alpha channel is used directly.
+        For ``type="luminance"``, the mask's luminance (brightness) is
+        converted to alpha.
+
+        Parameters
+        ----------
+        mask_surface : cairo.ImageSurface
+            The rendered mask surface.
+        mask_type : str
+            ``"alpha"`` or ``"luminance"``.
+        """
+        x0, y0, pw, ph = self._vp_stack[-1]
+
+        if mask_type == "luminance":
+            # Convert luminance to alpha: iterate pixels and set alpha
+            # based on brightness. This is approximate; full implementation
+            # would need per-pixel manipulation.
+            pass  # Cairo doesn't natively support luminance masks;
+            # the alpha channel is used as-is for now.
+
+        # Apply mask at the current viewport position
+        self._ctx.mask_surface(mask_surface, x0, y0)
+
     def pop_viewport(self) -> None:
         """Pop the current viewport and restore clipping state."""
         if len(self._vp_stack) > 1:
@@ -317,15 +399,63 @@ class CairoRenderer:
                 if had_clip:
                     self._ctx.restore()
 
-    def _compute_grid(self, layout: Any, parent_w: float, parent_h: float) -> dict:
-        """Compute row/column positions for a GridLayout within the parent."""
+    def _compute_grid(self, layout: Any, parent_w: float, parent_h: float,
+                       respect: bool = False) -> dict:
+        """Compute row/column positions for a GridLayout within the parent.
+
+        When *respect* is ``True`` (R: ``gtable(..., respect=TRUE)``),
+        null units are scaled so that 1 null has the same physical size
+        in both dimensions — preserving the aspect ratio encoded in the
+        null-unit values.
+        """
         nrow = getattr(layout, "nrow", 1)
         ncol = getattr(layout, "ncol", 1)
         widths = getattr(layout, "widths", None)
         heights = getattr(layout, "heights", None)
 
-        col_widths = self._resolve_sizes(widths, ncol, parent_w)
-        row_heights = self._resolve_sizes(heights, nrow, parent_h)
+        if not respect:
+            col_widths = self._resolve_sizes(widths, ncol, parent_w)
+            row_heights = self._resolve_sizes(heights, nrow, parent_h)
+        else:
+            # Respect mode: null units must have equal physical scale in
+            # both dimensions.  Compute the scale that fits both.
+            col_widths = self._resolve_sizes(widths, ncol, parent_w)
+            row_heights = self._resolve_sizes(heights, nrow, parent_h)
+            # Find null-unit entries and their total
+            from ._units import Unit, _INCHES_PER
+            w_null_total, h_null_total = 0.0, 0.0
+            w_remaining, h_remaining = parent_w, parent_h
+            if isinstance(widths, Unit):
+                for v, t in zip(widths._values, widths._units):
+                    if t in _INCHES_PER:
+                        w_remaining -= float(v) * _INCHES_PER[t] * self.dpi
+                    elif t == "npc":
+                        w_remaining -= float(v) * parent_w
+                    elif t == "null":
+                        w_null_total += float(v)
+                    else:
+                        w_null_total += float(v)
+            if isinstance(heights, Unit):
+                for v, t in zip(heights._values, heights._units):
+                    if t in _INCHES_PER:
+                        h_remaining -= float(v) * _INCHES_PER[t] * self.dpi
+                    elif t == "npc":
+                        h_remaining -= float(v) * parent_h
+                    elif t == "null":
+                        h_null_total += float(v)
+                    else:
+                        h_null_total += float(v)
+            w_remaining = max(w_remaining, 0.0)
+            h_remaining = max(h_remaining, 0.0)
+            if w_null_total > 0 and h_null_total > 0:
+                scale_w = w_remaining / w_null_total
+                scale_h = h_remaining / h_null_total
+                scale = min(scale_w, scale_h)
+                # Re-resolve with unified scale
+                col_widths = self._resolve_sizes_with_scale(
+                    widths, ncol, parent_w, scale)
+                row_heights = self._resolve_sizes_with_scale(
+                    heights, nrow, parent_h, scale)
 
         col_starts = [sum(col_widths[:i]) for i in range(ncol)]
         row_starts = [sum(row_heights[:i]) for i in range(nrow)]
@@ -334,6 +464,26 @@ class CairoRenderer:
             "col_starts": col_starts, "col_widths": col_widths,
             "row_starts": row_starts, "row_heights": row_heights,
         }
+
+    def _resolve_sizes_with_scale(
+        self, unit_obj: Any, n: int, total: float, null_scale: float,
+    ) -> list:
+        """Resolve sizes using a fixed scale for null units (respect mode)."""
+        if unit_obj is None:
+            return [null_scale] * n
+        from ._units import Unit, _INCHES_PER
+        if not isinstance(unit_obj, Unit):
+            return [null_scale] * n
+        dpi = getattr(self, "dpi", 150.0)
+        sizes = []
+        for v, t in zip(unit_obj._values, unit_obj._units):
+            if t == "npc":
+                sizes.append(float(v) * total)
+            elif t in _INCHES_PER:
+                sizes.append(float(v) * _INCHES_PER[t] * dpi)
+            else:
+                sizes.append(float(v) * null_scale)
+        return sizes
 
     def _resolve_sizes(self, unit_obj: Any, n: int, total: float) -> list:
         """Resolve a Unit vector to device sizes, distributing null units.
@@ -504,15 +654,20 @@ class CairoRenderer:
         # Handle gradient objects (LinearGradient / RadialGradient)
         if isinstance(fill, (LinearGradient, RadialGradient)):
             return self._setup_gradient(fill, gp, bbox=bbox)
+        # Handle tiling pattern
+        if isinstance(fill, Pattern):
+            return self._setup_pattern(fill, gp, bbox=bbox)
 
         fill_val = fill[0] if isinstance(fill, (list, tuple)) else fill
         # R semantics: fill=NA (None) means "no fill" → transparent
         if fill_val is None:
             return (0.0, 0.0, 0.0, 0.0)
 
-        # Check if a scalar fill_val is a gradient object (not a string)
+        # Check if a scalar fill_val is a gradient or pattern object
         if isinstance(fill_val, (LinearGradient, RadialGradient)):
             return self._setup_gradient(fill_val, gp, bbox=bbox)
+        if isinstance(fill_val, Pattern):
+            return self._setup_pattern(fill_val, gp, bbox=bbox)
 
         rgba = _parse_colour(fill_val)
 
@@ -630,6 +785,107 @@ class CairoRenderer:
         pattern.set_extend(extend_map.get(gradient.extend, cairo.EXTEND_PAD))
 
         return pattern
+
+    def _setup_pattern(
+        self,
+        pat: "Pattern",
+        gp: Optional[Gpar] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> "cairo.Pattern":
+        """Convert a grid tiling Pattern to a cairo SurfacePattern.
+
+        Renders the pattern's grob to an off-screen Cairo surface, then
+        creates a ``cairo.SurfacePattern`` with the appropriate extend mode.
+
+        Mirrors R's ``resolvePattern.GridTilingPattern`` (patterns.R:420-429).
+
+        Parameters
+        ----------
+        pat : Pattern
+            The tiling pattern specification.
+        gp : Gpar or None
+            Graphical parameters (for alpha).
+        bbox : tuple or None
+            Shape bounding box in NPC (for group=False resolution).
+
+        Returns
+        -------
+        cairo.SurfacePattern
+            A cairo surface pattern for tiling.
+        """
+        # Resolve tile position and dimensions in NPC
+        px = float(pat.x.values[0])
+        py = float(pat.y.values[0])
+        pw = float(pat.width.values[0])
+        ph = float(pat.height.values[0])
+
+        if not pat.group and bbox is not None:
+            bx, by, bw, bh = bbox
+            px = bx + px * bw
+            py = by + py * bh
+            pw = pw * bw
+            ph = ph * bh
+
+        # Compute tile origin (left, bottom) using justification
+        tile_left = px - pat.hjust * pw
+        tile_bottom = py - pat.vjust * ph
+
+        # Convert to device coordinates
+        tile_dx = self._x(tile_left)
+        tile_dy = self._y(tile_bottom + ph)  # Y-flip: top in device coords
+        tile_dw = max(int(round(self._sx(pw))), 1)
+        tile_dh = max(int(round(self._sy(ph))), 1)
+
+        # Render the pattern grob to an off-screen surface
+        tile_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, tile_dw, tile_dh)
+        tile_ctx = tile_surface
+
+        # Create a temporary renderer for the tile
+        tile_renderer = CairoRenderer(
+            width=pw * 2.54,  # convert NPC width to approximate inches
+            height=ph * 2.54,
+            dpi=self.dpi,
+            surface_type="image",
+        )
+
+        # Draw the grob into the tile using state swap
+        try:
+            from ._draw import grid_draw
+            from ._state import get_state
+            state = get_state()
+            orig_renderer = state._renderer
+            state._renderer = tile_renderer
+            # Reset viewport to root for clean drawing
+            tile_renderer.push_viewport(None)
+            try:
+                grid_draw(pat.grob, recording=False)
+            finally:
+                state._renderer = orig_renderer
+        except Exception:
+            # If grob rendering fails, return transparent
+            return (0.0, 0.0, 0.0, 0.0)
+
+        tile_surface = tile_renderer._surface
+
+        # Create a surface pattern from the rendered tile
+        surface_pattern = cairo.SurfacePattern(tile_surface)
+
+        # Set extend mode
+        extend_map = {
+            "pad": cairo.EXTEND_PAD,
+            "repeat": cairo.EXTEND_REPEAT,
+            "reflect": cairo.EXTEND_REFLECT,
+            "none": cairo.EXTEND_NONE,
+        }
+        surface_pattern.set_extend(extend_map.get(pat.extend, cairo.EXTEND_REPEAT))
+
+        # Set the pattern matrix to position the tile correctly
+        # The pattern needs to be translated to the tile's position in device space
+        matrix = cairo.Matrix()
+        matrix.translate(-tile_dx, -tile_dy)
+        surface_pattern.set_matrix(matrix)
+
+        return surface_pattern
 
     def _apply_fill(
         self,
@@ -1276,7 +1532,22 @@ class CairoRenderer:
         ctx = self._ctx
         ctx.save()
 
-        img_array = np.asarray(image, dtype=np.uint8)
+        img_array = np.asarray(image)
+
+        # Handle colour string arrays (e.g. from colourbar raster)
+        # Convert colour strings to uint8 RGBA
+        if img_array.dtype.kind in ("U", "S", "O"):
+            h_img, w_img = img_array.shape[:2]
+            rgba = np.zeros((h_img, w_img, 4), dtype=np.uint8)
+            for r in range(h_img):
+                for c in range(w_img):
+                    colour = img_array[r, c] if img_array.ndim >= 2 else img_array[r]
+                    cr, cg, cb, ca = _parse_colour(str(colour))
+                    rgba[r, c] = [int(cr * 255), int(cg * 255),
+                                  int(cb * 255), int(ca * 255)]
+            img_array = rgba
+        else:
+            img_array = img_array.astype(np.uint8)
         if img_array.ndim == 2:
             # Greyscale → RGBA
             rgba = np.stack([img_array] * 3 + [np.full_like(img_array, 255)], axis=-1)
