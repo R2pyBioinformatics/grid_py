@@ -217,6 +217,7 @@ class CairoRenderer:
         else:
             self._vp_stack = [(0.0, 0.0, self.width_in * 72.0, self.height_in * 72.0)]
         self._layout_stack: list = []  # GridLayout info stack
+        self._layout_depth_stack: list = []  # vp_stack depths at layout pushes
         self._clip_stack: list = []   # Track which viewport pushes had clipping
 
     # ---- viewport management -----------------------------------------------
@@ -245,6 +246,8 @@ class CairoRenderer:
             self._vp_stack.append((x0, y0, pw, ph))
             self._layout_stack.append(grid_info)
             self._clip_stack.append(False)
+            # Track that this viewport level pushed a layout (for pop)
+            self._layout_depth_stack.append(len(self._vp_stack))
             return
 
         if layout_pos_row is not None and layout_pos_col is not None:
@@ -391,8 +394,14 @@ class CairoRenderer:
         self._ctx.mask_surface(mask_surface, x0, y0)
 
     def pop_viewport(self) -> None:
-        """Pop the current viewport and restore clipping state."""
+        """Pop the current viewport and restore clipping/layout state."""
         if len(self._vp_stack) > 1:
+            # If this viewport pushed a layout, pop it too
+            depth_stack = getattr(self, "_layout_depth_stack", [])
+            if depth_stack and depth_stack[-1] == len(self._vp_stack):
+                depth_stack.pop()
+                if self._layout_stack:
+                    self._layout_stack.pop()
             self._vp_stack.pop()
             if self._clip_stack:
                 had_clip = self._clip_stack.pop()
