@@ -636,6 +636,186 @@ def _raster_height_details(grob: Any) -> Unit:
     return _rect_height_details(grob)
 
 
+# -- xspline grob (R: primitives.R:845-861, uses C_xsplineBounds) ----------
+
+def _xspline_width_details(grob: Any) -> Unit:
+    """Width of an xspline grob: bounding box of evaluated spline points.
+
+    R calls ``C_xsplineBounds`` which evaluates the spline and computes
+    bounds.  We use ``xspline_points()`` for the same effect.
+
+    Mirrors ``widthDetails.xspline`` (R ``primitives.R:845``).
+    """
+    try:
+        from ._curve import xspline_points
+        pts = xspline_points(grob)
+        if len(pts["x"]) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][2]
+            npc_width = float(pts["x"].max() - pts["x"].min())
+            return Unit(npc_width * vp_px / renderer.dpi, "inches")
+        return Unit(float(pts["x"].max() - pts["x"].min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
+def _xspline_height_details(grob: Any) -> Unit:
+    """Height of an xspline grob.
+
+    Mirrors ``heightDetails.xspline`` (R ``primitives.R:853``).
+    """
+    try:
+        from ._curve import xspline_points
+        pts = xspline_points(grob)
+        if len(pts["y"]) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][3]
+            npc_height = float(pts["y"].max() - pts["y"].min())
+            return Unit(npc_height * vp_px / renderer.dpi, "inches")
+        return Unit(float(pts["y"].max() - pts["y"].min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
+# -- bezier grob (R: primitives.R:997-1003, expands via splinegrob()) ------
+
+def _bezier_width_details(grob: Any) -> Unit:
+    """Width of a bezier grob: bounding box of evaluated Bezier points.
+
+    R's ``widthDetails.beziergrob`` calls ``splinegrob()`` to expand to
+    an xsplineGrob, then delegates.  We use ``bezier_points()`` directly.
+
+    Mirrors ``widthDetails.beziergrob`` (R ``primitives.R:997``).
+    """
+    try:
+        from ._curve import bezier_points
+        pts = bezier_points(grob)
+        if len(pts["x"]) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][2]
+            npc_width = float(pts["x"].max() - pts["x"].min())
+            return Unit(npc_width * vp_px / renderer.dpi, "inches")
+        return Unit(float(pts["x"].max() - pts["x"].min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
+def _bezier_height_details(grob: Any) -> Unit:
+    """Height of a bezier grob.
+
+    Mirrors ``heightDetails.beziergrob`` (R ``primitives.R:1001``).
+    """
+    try:
+        from ._curve import bezier_points
+        pts = bezier_points(grob)
+        if len(pts["y"]) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][3]
+            npc_height = float(pts["y"].max() - pts["y"].min())
+            return Unit(npc_height * vp_px / renderer.dpi, "inches")
+        return Unit(float(pts["y"].max() - pts["y"].min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
+# -- curve grob (R: curve.R:481-495, expands via calcCurveGrob()) ----------
+
+def _curve_width_details(grob: Any) -> Unit:
+    """Width of a curve grob: expand to control points, compute bbox.
+
+    R's ``widthDetails.curve`` calls ``calcCurveGrob()`` to build the
+    expanded gTree, then delegates to children's widthDetails.  We
+    compute the curve control points directly.
+
+    Mirrors ``widthDetails.curve`` (R ``curve.R:481``).
+    """
+    try:
+        from ._curve import _calc_curve_points
+        from ._units import Unit as _Unit
+        x1 = getattr(grob, "x1", None)
+        y1 = getattr(grob, "y1", None)
+        x2 = getattr(grob, "x2", None)
+        y2 = getattr(grob, "y2", None)
+        if x1 is None or x2 is None:
+            return Unit(0, "inches")
+        x1v = float(x1._values[0]) if isinstance(x1, _Unit) else float(x1)
+        y1v = float(y1._values[0]) if isinstance(y1, _Unit) else float(y1)
+        x2v = float(x2._values[0]) if isinstance(x2, _Unit) else float(x2)
+        y2v = float(y2._values[0]) if isinstance(y2, _Unit) else float(y2)
+
+        px, py = _calc_curve_points(
+            x1v, y1v, x2v, y2v,
+            curvature=float(getattr(grob, "curvature", 1.0)),
+            angle=float(getattr(grob, "angle", 90.0)),
+            ncp=int(getattr(grob, "ncp", 1)),
+            shape=float(getattr(grob, "shape", 0.5)),
+            square=bool(getattr(grob, "square", True)),
+            squareShape=float(getattr(grob, "squareShape", 1.0)),
+            inflect=bool(getattr(grob, "inflect", False)),
+            open_=bool(getattr(grob, "open_", getattr(grob, "open", True))),
+        )
+        if len(px) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][2]
+            npc_width = float(px.max() - px.min())
+            return Unit(npc_width * vp_px / renderer.dpi, "inches")
+        return Unit(float(px.max() - px.min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
+def _curve_height_details(grob: Any) -> Unit:
+    """Height of a curve grob.
+
+    Mirrors ``heightDetails.curve`` (R ``curve.R:489``).
+    """
+    try:
+        from ._curve import _calc_curve_points
+        from ._units import Unit as _Unit
+        x1 = getattr(grob, "x1", None)
+        y1 = getattr(grob, "y1", None)
+        x2 = getattr(grob, "x2", None)
+        y2 = getattr(grob, "y2", None)
+        if y1 is None or y2 is None:
+            return Unit(0, "inches")
+        x1v = float(x1._values[0]) if isinstance(x1, _Unit) else float(x1)
+        y1v = float(y1._values[0]) if isinstance(y1, _Unit) else float(y1)
+        x2v = float(x2._values[0]) if isinstance(x2, _Unit) else float(x2)
+        y2v = float(y2._values[0]) if isinstance(y2, _Unit) else float(y2)
+
+        px, py = _calc_curve_points(
+            x1v, y1v, x2v, y2v,
+            curvature=float(getattr(grob, "curvature", 1.0)),
+            angle=float(getattr(grob, "angle", 90.0)),
+            ncp=int(getattr(grob, "ncp", 1)),
+            shape=float(getattr(grob, "shape", 0.5)),
+            square=bool(getattr(grob, "square", True)),
+            squareShape=float(getattr(grob, "squareShape", 1.0)),
+            inflect=bool(getattr(grob, "inflect", False)),
+            open_=bool(getattr(grob, "open_", getattr(grob, "open", True))),
+        )
+        if len(py) == 0:
+            return Unit(0, "inches")
+        renderer = _get_renderer()
+        if renderer is not None:
+            vp_px = renderer._vp_stack[-1][3]
+            npc_height = float(py.max() - py.min())
+            return Unit(npc_height * vp_px / renderer.dpi, "inches")
+        return Unit(float(py.max() - py.min()), "npc")
+    except Exception:
+        return Unit(0, "inches")
+
+
 # ---------------------------------------------------------------------------
 # _grid_class dispatch tables
 # ---------------------------------------------------------------------------
@@ -653,6 +833,9 @@ _WIDTH_DISPATCH: Dict[str, Any] = {
     "circle": _circle_width_details,
     "pathgrob": _path_width_details,
     "rastergrob": _raster_width_details,
+    "xspline": _xspline_width_details,
+    "beziergrob": _bezier_width_details,
+    "curve": _curve_width_details,
 }
 
 _HEIGHT_DISPATCH: Dict[str, Any] = {
@@ -668,6 +851,9 @@ _HEIGHT_DISPATCH: Dict[str, Any] = {
     "circle": _circle_height_details,
     "pathgrob": _path_height_details,
     "rastergrob": _raster_height_details,
+    "xspline": _xspline_height_details,
+    "beziergrob": _bezier_height_details,
+    "curve": _curve_height_details,
 }
 
 _ASCENT_DISPATCH: Dict[str, Any] = {
