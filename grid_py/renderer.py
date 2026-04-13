@@ -1539,7 +1539,12 @@ class CairoRenderer:
         else:
             ctx.move_to(dx + off_x, dy + off_y)
 
-        ctx.show_text(str(label))
+        if self._path_collecting:
+            # Build text outline path without rendering pixels
+            # (mirrors R's use of cairo_text_path in C_stroke/C_fill)
+            ctx.text_path(str(label))
+        else:
+            ctx.show_text(str(label))
         ctx.restore()
 
     # ------------------------------------------------------------------ #

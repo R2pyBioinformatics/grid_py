@@ -89,6 +89,22 @@ class TestRendering:
         fsg = fill_stroke_grob(g, gp=Gpar(fill="green", col="black"))
         grid_draw(fsg)
 
+    def test_stroke_text_outline(self):
+        """stroke_grob(text_grob(...)) renders text as outline path."""
+        from grid_py._primitives import text_grob as _text_grob
+        grid_newpage(width=3.0, height=3.0, dpi=72)
+        tg = _text_grob("ABC", x=Unit(0.5, "npc"), y=Unit(0.5, "npc"))
+        sg = stroke_grob(tg, gp=Gpar(col="black", lwd=2))
+        grid_draw(sg)  # should not raise
+
+    def test_fill_text_outline(self):
+        """fill_grob(text_grob(...)) fills text outlines."""
+        from grid_py._primitives import text_grob as _text_grob
+        grid_newpage(width=3.0, height=3.0, dpi=72)
+        tg = _text_grob("XYZ", x=Unit(0.5, "npc"), y=Unit(0.5, "npc"))
+        fg = fill_grob(tg, gp=Gpar(fill="red"))
+        grid_draw(fg)
+
     def test_fill_evenodd_rule(self):
         grid_newpage(width=3.0, height=3.0, dpi=72)
         g = rect_grob()
