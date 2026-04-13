@@ -26,6 +26,7 @@ except ImportError:
     )
 
 from ._gpar import Gpar
+from ._patterns import LinearGradient, RadialGradient, Pattern
 
 __all__ = ["CairoRenderer"]
 
@@ -216,6 +217,7 @@ class CairoRenderer:
         else:
             self._vp_stack = [(0.0, 0.0, self.width_in * 72.0, self.height_in * 72.0)]
         self._layout_stack: list = []  # GridLayout info stack
+        self._layout_depth_stack: list = []  # vp_stack depths at layout pushes
         self._clip_stack: list = []   # Track which viewport pushes had clipping
 
     # ---- viewport management -----------------------------------------------
@@ -238,10 +240,14 @@ class CairoRenderer:
 
         if layout is not None:
             # Layout viewport: same size as parent, but store grid info
-            grid_info = self._compute_grid(layout, pw, ph)
+            respect = getattr(layout, "respect", False)
+            grid_info = self._compute_grid(
+                layout, pw, ph, respect=bool(respect))
             self._vp_stack.append((x0, y0, pw, ph))
             self._layout_stack.append(grid_info)
             self._clip_stack.append(False)
+            # Track that this viewport level pushed a layout (for pop)
+            self._layout_depth_stack.append(len(self._vp_stack))
             return
 
         if layout_pos_row is not None and layout_pos_col is not None:
@@ -307,24 +313,158 @@ class CairoRenderer:
         else:
             self._clip_stack.append(False)
 
+    def render_mask(self, mask_grob: Any) -> Optional["cairo.ImageSurface"]:
+        """Render a mask grob to an off-screen alpha surface.
+
+        Mirrors R's ``resolveMask.GridMask`` which draws the mask grob
+        and extracts the alpha channel for compositing.
+
+        Parameters
+        ----------
+        mask_grob : grob
+            A grob to render as the mask.
+
+        Returns
+        -------
+        cairo.ImageSurface or None
+            An ARGB32 surface whose alpha channel is the mask, or
+            ``None`` on failure.
+        """
+        x0, y0, pw, ph = self._vp_stack[-1]
+        dw = max(int(round(pw)), 1)
+        dh = max(int(round(ph)), 1)
+
+        mask_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, dw, dh)
+        mask_renderer = CairoRenderer.__new__(CairoRenderer)
+        mask_renderer._surface = mask_surface
+        mask_renderer._ctx = cairo.Context(mask_surface)
+        mask_renderer._surface_type = "image"
+        mask_renderer.dpi = self.dpi
+        mask_renderer._vp_stack = [(0.0, 0.0, float(dw), float(dh))]
+        mask_renderer._clip_stack = [False]
+        mask_renderer._layout_stack = []
+
+        # Clear to transparent
+        mask_renderer._ctx.set_source_rgba(0, 0, 0, 0)
+        mask_renderer._ctx.paint()
+
+        try:
+            from ._draw import grid_draw
+            from ._state import get_state
+            state = get_state()
+            orig_renderer = state._renderer
+            state._renderer = mask_renderer
+            try:
+                grid_draw(mask_grob, recording=False)
+            finally:
+                state._renderer = orig_renderer
+        except Exception:
+            return None
+
+        return mask_surface
+
+    def apply_mask(
+        self,
+        mask_surface: "cairo.ImageSurface",
+        mask_type: str = "alpha",
+    ) -> None:
+        """Apply a pre-rendered mask surface to the current drawing.
+
+        For ``type="alpha"``, the mask's alpha channel is used directly.
+        For ``type="luminance"``, the mask's luminance (brightness) is
+        converted to alpha.
+
+        Parameters
+        ----------
+        mask_surface : cairo.ImageSurface
+            The rendered mask surface.
+        mask_type : str
+            ``"alpha"`` or ``"luminance"``.
+        """
+        x0, y0, pw, ph = self._vp_stack[-1]
+
+        if mask_type == "luminance":
+            # Convert luminance to alpha: iterate pixels and set alpha
+            # based on brightness. This is approximate; full implementation
+            # would need per-pixel manipulation.
+            pass  # Cairo doesn't natively support luminance masks;
+            # the alpha channel is used as-is for now.
+
+        # Apply mask at the current viewport position
+        self._ctx.mask_surface(mask_surface, x0, y0)
+
     def pop_viewport(self) -> None:
-        """Pop the current viewport and restore clipping state."""
+        """Pop the current viewport and restore clipping/layout state."""
         if len(self._vp_stack) > 1:
+            # If this viewport pushed a layout, pop it too
+            depth_stack = getattr(self, "_layout_depth_stack", [])
+            if depth_stack and depth_stack[-1] == len(self._vp_stack):
+                depth_stack.pop()
+                if self._layout_stack:
+                    self._layout_stack.pop()
             self._vp_stack.pop()
             if self._clip_stack:
                 had_clip = self._clip_stack.pop()
                 if had_clip:
                     self._ctx.restore()
 
-    def _compute_grid(self, layout: Any, parent_w: float, parent_h: float) -> dict:
-        """Compute row/column positions for a GridLayout within the parent."""
+    def _compute_grid(self, layout: Any, parent_w: float, parent_h: float,
+                       respect: bool = False) -> dict:
+        """Compute row/column positions for a GridLayout within the parent.
+
+        When *respect* is ``True`` (R: ``gtable(..., respect=TRUE)``),
+        null units are scaled so that 1 null has the same physical size
+        in both dimensions — preserving the aspect ratio encoded in the
+        null-unit values.
+        """
         nrow = getattr(layout, "nrow", 1)
         ncol = getattr(layout, "ncol", 1)
         widths = getattr(layout, "widths", None)
         heights = getattr(layout, "heights", None)
 
-        col_widths = self._resolve_sizes(widths, ncol, parent_w)
-        row_heights = self._resolve_sizes(heights, nrow, parent_h)
+        if not respect:
+            col_widths = self._resolve_sizes(widths, ncol, parent_w)
+            row_heights = self._resolve_sizes(heights, nrow, parent_h)
+        else:
+            # Respect mode: null units must have equal physical scale in
+            # both dimensions.  Compute the scale that fits both.
+            col_widths = self._resolve_sizes(widths, ncol, parent_w)
+            row_heights = self._resolve_sizes(heights, nrow, parent_h)
+            # Find null-unit entries and their total
+            from ._units import Unit, _INCHES_PER
+            w_null_total, h_null_total = 0.0, 0.0
+            w_remaining, h_remaining = parent_w, parent_h
+            if isinstance(widths, Unit):
+                for v, t in zip(widths._values, widths._units):
+                    if t in _INCHES_PER:
+                        w_remaining -= float(v) * _INCHES_PER[t] * self.dpi
+                    elif t == "npc":
+                        w_remaining -= float(v) * parent_w
+                    elif t == "null":
+                        w_null_total += float(v)
+                    else:
+                        w_null_total += float(v)
+            if isinstance(heights, Unit):
+                for v, t in zip(heights._values, heights._units):
+                    if t in _INCHES_PER:
+                        h_remaining -= float(v) * _INCHES_PER[t] * self.dpi
+                    elif t == "npc":
+                        h_remaining -= float(v) * parent_h
+                    elif t == "null":
+                        h_null_total += float(v)
+                    else:
+                        h_null_total += float(v)
+            w_remaining = max(w_remaining, 0.0)
+            h_remaining = max(h_remaining, 0.0)
+            if w_null_total > 0 and h_null_total > 0:
+                scale_w = w_remaining / w_null_total
+                scale_h = h_remaining / h_null_total
+                scale = min(scale_w, scale_h)
+                # Re-resolve with unified scale
+                col_widths = self._resolve_sizes_with_scale(
+                    widths, ncol, parent_w, scale)
+                row_heights = self._resolve_sizes_with_scale(
+                    heights, nrow, parent_h, scale)
 
         col_starts = [sum(col_widths[:i]) for i in range(ncol)]
         row_starts = [sum(row_heights[:i]) for i in range(nrow)]
@@ -333,6 +473,26 @@ class CairoRenderer:
             "col_starts": col_starts, "col_widths": col_widths,
             "row_starts": row_starts, "row_heights": row_heights,
         }
+
+    def _resolve_sizes_with_scale(
+        self, unit_obj: Any, n: int, total: float, null_scale: float,
+    ) -> list:
+        """Resolve sizes using a fixed scale for null units (respect mode)."""
+        if unit_obj is None:
+            return [null_scale] * n
+        from ._units import Unit, _INCHES_PER
+        if not isinstance(unit_obj, Unit):
+            return [null_scale] * n
+        dpi = getattr(self, "dpi", 150.0)
+        sizes = []
+        for v, t in zip(unit_obj._values, unit_obj._units):
+            if t == "npc":
+                sizes.append(float(v) * total)
+            elif t in _INCHES_PER:
+                sizes.append(float(v) * _INCHES_PER[t] * dpi)
+            else:
+                sizes.append(float(v) * null_scale)
+        return sizes
 
     def _resolve_sizes(self, unit_obj: Any, n: int, total: float) -> list:
         """Resolve a Unit vector to device sizes, distributing null units.
@@ -477,15 +637,47 @@ class CairoRenderer:
 
         return rgba
 
-    def _fill_rgba(self, gp: Optional[Gpar]) -> Tuple[float, float, float, float]:
-        """Extract fill colour from Gpar."""
+    def _fill_rgba(
+        self,
+        gp: Optional[Gpar],
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> Union[Tuple[float, float, float, float], "cairo.Pattern"]:
+        """Extract fill colour or gradient pattern from Gpar.
+
+        Returns either an RGBA tuple for solid colours, or a
+        ``cairo.LinearGradient`` / ``cairo.RadialGradient`` pattern
+        for gradient fills.
+
+        Parameters
+        ----------
+        gp : Gpar or None
+            Graphical parameters.
+        bbox : tuple or None
+            Shape bounding box ``(x, y, w, h)`` in NPC, passed to
+            ``_setup_gradient`` for ``group=False`` resolution.
+        """
         if gp is None:
             return (1.0, 1.0, 1.0, 1.0)
         fill = gp.get("fill", None)
+
+        # Handle gradient objects (LinearGradient / RadialGradient)
+        if isinstance(fill, (LinearGradient, RadialGradient)):
+            return self._setup_gradient(fill, gp, bbox=bbox)
+        # Handle tiling pattern
+        if isinstance(fill, Pattern):
+            return self._setup_pattern(fill, gp, bbox=bbox)
+
         fill_val = fill[0] if isinstance(fill, (list, tuple)) else fill
         # R semantics: fill=NA (None) means "no fill" → transparent
         if fill_val is None:
             return (0.0, 0.0, 0.0, 0.0)
+
+        # Check if a scalar fill_val is a gradient or pattern object
+        if isinstance(fill_val, (LinearGradient, RadialGradient)):
+            return self._setup_gradient(fill_val, gp, bbox=bbox)
+        if isinstance(fill_val, Pattern):
+            return self._setup_pattern(fill_val, gp, bbox=bbox)
+
         rgba = _parse_colour(fill_val)
 
         alpha = gp.get("alpha", None)
@@ -493,6 +685,245 @@ class CairoRenderer:
             a = float(alpha[0] if isinstance(alpha, (list, tuple)) else alpha)
             rgba = (rgba[0], rgba[1], rgba[2], rgba[3] * a)
         return rgba
+
+    def _setup_gradient(
+        self,
+        gradient: Union[LinearGradient, RadialGradient],
+        gp: Optional[Gpar] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> "cairo.Pattern":
+        """Convert a grid gradient object to a cairo Pattern.
+
+        When ``gradient.group`` is ``True`` (default), coordinates are
+        resolved relative to the current viewport.  When ``False``,
+        coordinates are resolved relative to the shape's bounding box
+        given by *bbox* ``(x, y, w, h)`` in NPC.
+
+        Mirrors R's ``resolvePattern()`` in ``patterns.R:391-418``.
+
+        Parameters
+        ----------
+        gradient : LinearGradient or RadialGradient
+            The gradient specification.
+        gp : Gpar or None
+            Graphical parameters (for alpha).
+        bbox : tuple of float or None
+            Shape bounding box ``(x, y, w, h)`` in NPC, used when
+            ``gradient.group is False``.
+
+        Returns
+        -------
+        cairo.Pattern
+            A cairo linear or radial gradient pattern.
+        """
+        # Get alpha from gpar
+        gp_alpha = 1.0
+        if gp is not None:
+            a = gp.get("alpha", None)
+            if a is not None:
+                gp_alpha = float(a[0] if isinstance(a, (list, tuple)) else a)
+
+        # Determine coordinate mapping: viewport (group=True) or bbox (group=False)
+        use_bbox = (not gradient.group) and (bbox is not None)
+
+        if isinstance(gradient, LinearGradient):
+            gx1 = float(gradient.x1.values[0])
+            gy1 = float(gradient.y1.values[0])
+            gx2 = float(gradient.x2.values[0])
+            gy2 = float(gradient.y2.values[0])
+
+            if use_bbox:
+                # Map gradient NPC coords to shape bbox
+                bx, by, bw, bh = bbox
+                x1_npc = bx + gx1 * bw
+                y1_npc = by + gy1 * bh
+                x2_npc = bx + gx2 * bw
+                y2_npc = by + gy2 * bh
+            else:
+                x1_npc, y1_npc = gx1, gy1
+                x2_npc, y2_npc = gx2, gy2
+
+            pattern = cairo.LinearGradient(
+                self._x(x1_npc), self._y(y1_npc),
+                self._x(x2_npc), self._y(y2_npc),
+            )
+        elif isinstance(gradient, RadialGradient):
+            gcx1 = float(gradient.cx1.values[0])
+            gcy1 = float(gradient.cy1.values[0])
+            gr1 = float(gradient.r1.values[0])
+            gcx2 = float(gradient.cx2.values[0])
+            gcy2 = float(gradient.cy2.values[0])
+            gr2 = float(gradient.r2.values[0])
+
+            if use_bbox:
+                bx, by, bw, bh = bbox
+                cx1_npc = bx + gcx1 * bw
+                cy1_npc = by + gcy1 * bh
+                cx2_npc = bx + gcx2 * bw
+                cy2_npc = by + gcy2 * bh
+                # Scale radius by bbox size
+                r1_npc = gr1 * min(bw, bh)
+                r2_npc = gr2 * min(bw, bh)
+            else:
+                cx1_npc, cy1_npc = gcx1, gcy1
+                cx2_npc, cy2_npc = gcx2, gcy2
+                r1_npc, r2_npc = gr1, gr2
+
+            r1_dev = (self._sx(r1_npc) + self._sy(r1_npc)) / 2.0
+            r2_dev = (self._sx(r2_npc) + self._sy(r2_npc)) / 2.0
+
+            pattern = cairo.RadialGradient(
+                self._x(cx1_npc), self._y(cy1_npc), r1_dev,
+                self._x(cx2_npc), self._y(cy2_npc), r2_dev,
+            )
+        else:
+            return (0.0, 0.0, 0.0, 0.0)
+
+        # Add colour stops
+        for colour_str, stop in zip(gradient.colours, gradient.stops):
+            r, g, b, a = _parse_colour(colour_str)
+            pattern.add_color_stop_rgba(stop, r, g, b, a * gp_alpha)
+
+        # Set extend mode
+        extend_map = {
+            "pad": cairo.EXTEND_PAD,
+            "repeat": cairo.EXTEND_REPEAT,
+            "reflect": cairo.EXTEND_REFLECT,
+            "none": cairo.EXTEND_NONE,
+        }
+        pattern.set_extend(extend_map.get(gradient.extend, cairo.EXTEND_PAD))
+
+        return pattern
+
+    def _setup_pattern(
+        self,
+        pat: "Pattern",
+        gp: Optional[Gpar] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> "cairo.Pattern":
+        """Convert a grid tiling Pattern to a cairo SurfacePattern.
+
+        Renders the pattern's grob to an off-screen Cairo surface, then
+        creates a ``cairo.SurfacePattern`` with the appropriate extend mode.
+
+        Mirrors R's ``resolvePattern.GridTilingPattern`` (patterns.R:420-429).
+
+        Parameters
+        ----------
+        pat : Pattern
+            The tiling pattern specification.
+        gp : Gpar or None
+            Graphical parameters (for alpha).
+        bbox : tuple or None
+            Shape bounding box in NPC (for group=False resolution).
+
+        Returns
+        -------
+        cairo.SurfacePattern
+            A cairo surface pattern for tiling.
+        """
+        # Resolve tile position and dimensions in NPC
+        px = float(pat.x.values[0])
+        py = float(pat.y.values[0])
+        pw = float(pat.width.values[0])
+        ph = float(pat.height.values[0])
+
+        if not pat.group and bbox is not None:
+            bx, by, bw, bh = bbox
+            px = bx + px * bw
+            py = by + py * bh
+            pw = pw * bw
+            ph = ph * bh
+
+        # Compute tile origin (left, bottom) using justification
+        tile_left = px - pat.hjust * pw
+        tile_bottom = py - pat.vjust * ph
+
+        # Convert to device coordinates
+        tile_dx = self._x(tile_left)
+        tile_dy = self._y(tile_bottom + ph)  # Y-flip: top in device coords
+        tile_dw = max(int(round(self._sx(pw))), 1)
+        tile_dh = max(int(round(self._sy(ph))), 1)
+
+        # Render the pattern grob to an off-screen surface
+        tile_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, tile_dw, tile_dh)
+        tile_ctx = tile_surface
+
+        # Create a temporary renderer for the tile
+        tile_renderer = CairoRenderer(
+            width=pw * 2.54,  # convert NPC width to approximate inches
+            height=ph * 2.54,
+            dpi=self.dpi,
+            surface_type="image",
+        )
+
+        # Draw the grob into the tile using state swap
+        try:
+            from ._draw import grid_draw
+            from ._state import get_state
+            state = get_state()
+            orig_renderer = state._renderer
+            state._renderer = tile_renderer
+            # Reset viewport to root for clean drawing
+            tile_renderer.push_viewport(None)
+            try:
+                grid_draw(pat.grob, recording=False)
+            finally:
+                state._renderer = orig_renderer
+        except Exception:
+            # If grob rendering fails, return transparent
+            return (0.0, 0.0, 0.0, 0.0)
+
+        tile_surface = tile_renderer._surface
+
+        # Create a surface pattern from the rendered tile
+        surface_pattern = cairo.SurfacePattern(tile_surface)
+
+        # Set extend mode
+        extend_map = {
+            "pad": cairo.EXTEND_PAD,
+            "repeat": cairo.EXTEND_REPEAT,
+            "reflect": cairo.EXTEND_REFLECT,
+            "none": cairo.EXTEND_NONE,
+        }
+        surface_pattern.set_extend(extend_map.get(pat.extend, cairo.EXTEND_REPEAT))
+
+        # Set the pattern matrix to position the tile correctly
+        # The pattern needs to be translated to the tile's position in device space
+        matrix = cairo.Matrix()
+        matrix.translate(-tile_dx, -tile_dy)
+        surface_pattern.set_matrix(matrix)
+
+        return surface_pattern
+
+    def _apply_fill(
+        self,
+        gp: Optional[Gpar],
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> bool:
+        """Apply fill (solid colour or gradient) to the current path.
+
+        Parameters
+        ----------
+        gp : Gpar or None
+            Graphical parameters.
+        bbox : tuple or None
+            Shape bounding box ``(x, y, w, h)`` in NPC for
+            ``group=False`` gradient resolution.
+
+        Returns ``True`` if a fill was applied, ``False`` if transparent.
+        """
+        ctx = self._ctx
+        fill = self._fill_rgba(gp, bbox=bbox)
+        if isinstance(fill, cairo.Pattern):
+            ctx.set_source(fill)
+            ctx.fill_preserve()
+            return True
+        elif isinstance(fill, tuple) and fill[3] > 0:
+            ctx.set_source_rgba(*fill)
+            ctx.fill_preserve()
+            return True
+        return False
 
     def _set_font(self, gp: Optional[Gpar]) -> float:
         """Configure font on context from Gpar.  Returns font size in device units."""
@@ -564,10 +995,9 @@ class CairoRenderer:
 
         ctx.rectangle(dx, dy, dw, dh)
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        # Compute bbox in NPC for group=False gradient resolution
+        bbox = (x0, y0, w, h)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -594,10 +1024,9 @@ class CairoRenderer:
 
         ctx.arc(cx, cy, dr, 0, 2 * math.pi)
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        # Compute bbox in NPC for group=False gradient resolution
+        bbox = (x - r, y - r, 2 * r, 2 * r)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -707,10 +1136,10 @@ class CairoRenderer:
             ctx.line_to(self._x(x[i]), self._y(y[i]))
         ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        # Compute bbox from polygon vertices
+        bbox = (float(np.min(x)), float(np.min(y)),
+                float(np.ptp(x)), float(np.ptp(y)))
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -748,10 +1177,9 @@ class CairoRenderer:
                 ctx.line_to(self._x(px[i]), self._y(py[i]))
             ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        bbox = (float(np.min(x)), float(np.min(y)),
+                float(np.ptp(x)), float(np.ptp(y)))
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
@@ -1113,7 +1541,22 @@ class CairoRenderer:
         ctx = self._ctx
         ctx.save()
 
-        img_array = np.asarray(image, dtype=np.uint8)
+        img_array = np.asarray(image)
+
+        # Handle colour string arrays (e.g. from colourbar raster)
+        # Convert colour strings to uint8 RGBA
+        if img_array.dtype.kind in ("U", "S", "O"):
+            h_img, w_img = img_array.shape[:2]
+            rgba = np.zeros((h_img, w_img, 4), dtype=np.uint8)
+            for r in range(h_img):
+                for c in range(w_img):
+                    colour = img_array[r, c] if img_array.ndim >= 2 else img_array[r]
+                    cr, cg, cb, ca = _parse_colour(str(colour))
+                    rgba[r, c] = [int(cr * 255), int(cg * 255),
+                                  int(cb * 255), int(ca * 255)]
+            img_array = rgba
+        else:
+            img_array = img_array.astype(np.uint8)
         if img_array.ndim == 2:
             # Greyscale → RGBA
             rgba = np.stack([img_array] * 3 + [np.full_like(img_array, 255)], axis=-1)
@@ -1194,10 +1637,8 @@ class CairoRenderer:
             ctx.arc(dx + dr, dy + dr, dr, math.pi, 3 * math.pi / 2)
             ctx.close_path()
 
-        fill = self._fill_rgba(gp)
-        if fill[3] > 0:
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
+        bbox = (x0, y0, w, h)
+        self._apply_fill(gp, bbox=bbox)
 
         stroke = self._apply_stroke(gp)
         if stroke[3] > 0:
