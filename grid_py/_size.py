@@ -164,6 +164,155 @@ def calc_string_metric(
 
 
 # ---------------------------------------------------------------------------
+# _grid_class-specific metric implementations
+# (mirrors R's S3 methods in primitives.R)
+# ---------------------------------------------------------------------------
+
+
+def _normalise_labels(grob: Any) -> list:
+    """Extract *label* from a grob as a plain Python list of strings."""
+    labels = getattr(grob, "label", "")
+    if isinstance(labels, str):
+        return [labels]
+    if isinstance(labels, (list, tuple)):
+        return [str(l) for l in labels]
+    # numpy array or other iterable
+    try:
+        return [str(l) for l in labels]
+    except TypeError:
+        return [str(labels)]
+
+
+# -- text grob (R: primitives.R:1430-1470) ---------------------------------
+
+def _text_width_details(grob: Any) -> Unit:
+    """Width of a text grob: max width across all labels.
+
+    Mirrors ``widthDetails.text`` (R ``primitives.R:1430``).
+    """
+    labels = _normalise_labels(grob)
+    gp = getattr(grob, "gp", None)
+    if not labels:
+        return Unit(0, "inches")
+    max_width = 0.0
+    for lab in labels:
+        m = calc_string_metric(lab, gp=gp)
+        max_width = max(max_width, m["width"])
+    return Unit(max_width, "inches")
+
+
+def _text_height_details(grob: Any) -> Unit:
+    """Height of a text grob: ascent + descent of the first label.
+
+    Mirrors ``heightDetails.text`` (R ``primitives.R:1442``).
+    """
+    labels = _normalise_labels(grob)
+    gp = getattr(grob, "gp", None)
+    text = labels[0] if labels else ""
+    m = calc_string_metric(text, gp=gp)
+    return Unit(m["ascent"] + m["descent"], "inches")
+
+
+def _text_ascent_details(grob: Any) -> Unit:
+    """Ascent of a text grob.
+
+    For a single label, returns the font ascent.  For multiple labels,
+    falls back to ``_text_height_details``.
+
+    Mirrors ``ascentDetails.text`` (R ``primitives.R:1454``).
+    """
+    labels = _normalise_labels(grob)
+    gp = getattr(grob, "gp", None)
+    if len(labels) == 1:
+        m = calc_string_metric(labels[0], gp=gp)
+        return Unit(m["ascent"], "inches")
+    return _text_height_details(grob)
+
+
+def _text_descent_details(grob: Any) -> Unit:
+    """Descent of a text grob.
+
+    For a single label, returns the font descent.  For multiple labels,
+    returns ``Unit(0, "inches")``.
+
+    Mirrors ``descentDetails.text`` (R ``primitives.R:1463``).
+    """
+    labels = _normalise_labels(grob)
+    gp = getattr(grob, "gp", None)
+    if len(labels) == 1:
+        m = calc_string_metric(labels[0], gp=gp)
+        return Unit(m["descent"], "inches")
+    return Unit(0, "inches")
+
+
+# -- null grob (R: primitives.R:1676-1682) ---------------------------------
+
+def _null_width_details(grob: Any) -> Unit:
+    """Width of a null grob: always zero.
+
+    Mirrors ``widthDetails.null`` (R ``primitives.R:1676``).
+    """
+    return Unit(0, "inches")
+
+
+def _null_height_details(grob: Any) -> Unit:
+    """Height of a null grob: always zero.
+
+    Mirrors ``heightDetails.null`` (R ``primitives.R:1680``).
+    """
+    return Unit(0, "inches")
+
+
+# -- rect grob (R: primitives.R:1146-1166) ---------------------------------
+
+def _rect_width_details(grob: Any) -> Unit:
+    """Width of a rect grob: its own *width* attribute.
+
+    Mirrors ``widthDetails.rect`` (R ``primitives.R:1146``).
+    """
+    w = getattr(grob, "width", None)
+    if w is not None and isinstance(w, Unit):
+        return w
+    return Unit(1, "npc")
+
+
+def _rect_height_details(grob: Any) -> Unit:
+    """Height of a rect grob: its own *height* attribute.
+
+    Mirrors ``heightDetails.rect`` (R ``primitives.R:1157``).
+    """
+    h = getattr(grob, "height", None)
+    if h is not None and isinstance(h, Unit):
+        return h
+    return Unit(1, "npc")
+
+
+# ---------------------------------------------------------------------------
+# _grid_class dispatch tables
+# ---------------------------------------------------------------------------
+
+_WIDTH_DISPATCH: Dict[str, Any] = {
+    "text": _text_width_details,
+    "null": _null_width_details,
+    "rect": _rect_width_details,
+}
+
+_HEIGHT_DISPATCH: Dict[str, Any] = {
+    "text": _text_height_details,
+    "null": _null_height_details,
+    "rect": _rect_height_details,
+}
+
+_ASCENT_DISPATCH: Dict[str, Any] = {
+    "text": _text_ascent_details,
+}
+
+_DESCENT_DISPATCH: Dict[str, Any] = {
+    "text": _text_descent_details,
+}
+
+
+# ---------------------------------------------------------------------------
 # Generic detail dispatchers (mirroring R's S3 method dispatch)
 # ---------------------------------------------------------------------------
 
@@ -171,19 +320,28 @@ def calc_string_metric(
 def width_details(x: Any) -> Unit:
     """Return the width of grob *x*.
 
+    Dispatches first by ``_grid_class`` attribute (text, null, rect),
+    then by ``width_details`` method on the object, and finally falls
+    back to ``Unit(1, "null")``.
+
     Parameters
     ----------
     x : Grob
-        A graphical object.  If it defines a ``width_details`` method, that
-        is called; otherwise a ``Unit(1, "null")`` is returned.
+        A graphical object.
 
     Returns
     -------
     Unit
         The width as a grid unit.
     """
+    cls = getattr(x, "_grid_class", None)
+    handler = _WIDTH_DISPATCH.get(cls)
+    if handler is not None:
+        return handler(x)
     if hasattr(x, "width_details") and callable(x.width_details):
-        return x.width_details()
+        result = x.width_details()
+        if result is not None:
+            return result
     return Unit(1, "null")
 
 
@@ -200,8 +358,14 @@ def height_details(x: Any) -> Unit:
     Unit
         The height as a grid unit.
     """
+    cls = getattr(x, "_grid_class", None)
+    handler = _HEIGHT_DISPATCH.get(cls)
+    if handler is not None:
+        return handler(x)
     if hasattr(x, "height_details") and callable(x.height_details):
-        return x.height_details()
+        result = x.height_details()
+        if result is not None:
+            return result
     return Unit(1, "null")
 
 
@@ -219,8 +383,14 @@ def ascent_details(x: Any) -> Unit:
         The ascent as a grid unit.  Falls back to ``height_details`` for
         grobs that do not define ``ascent_details``.
     """
+    cls = getattr(x, "_grid_class", None)
+    handler = _ASCENT_DISPATCH.get(cls)
+    if handler is not None:
+        return handler(x)
     if hasattr(x, "ascent_details") and callable(x.ascent_details):
-        return x.ascent_details()
+        result = x.ascent_details()
+        if result is not None:
+            return result
     return height_details(x)
 
 
@@ -237,8 +407,14 @@ def descent_details(x: Any) -> Unit:
     Unit
         The descent as a grid unit.  Default is ``Unit(0, "inches")``.
     """
+    cls = getattr(x, "_grid_class", None)
+    handler = _DESCENT_DISPATCH.get(cls)
+    if handler is not None:
+        return handler(x)
     if hasattr(x, "descent_details") and callable(x.descent_details):
-        return x.descent_details()
+        result = x.descent_details()
+        if result is not None:
+            return result
     return Unit(0, "inches")
 
 
