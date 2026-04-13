@@ -1,0 +1,85 @@
+/* gridpy.css — Default styles for grid_py interactive HTML output */
+
+.gridpy-container {
+    position: relative;
+    display: inline-block;
+    overflow: hidden;
+    font-family: sans-serif;
+}
+
+.gridpy-container canvas,
+.gridpy-container svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+/* SVG layer */
+.gridpy-svg {
+    z-index: 2;
+    pointer-events: none;
+}
+
+.gridpy-svg .grob-interactive {
+    pointer-events: all;
+}
+
+.gridpy-svg text {
+    pointer-events: none;
+    user-select: none;
+}
+
+/* Canvas layer */
+.gridpy-canvas {
+    z-index: 1;
+}
+
+/* Interaction overlay */
+.gridpy-overlay {
+    z-index: 3;
+    pointer-events: all;
+    fill: none;
+    stroke: none;
+}
+
+/* Tooltip */
+.gridpy-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.8);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: nowrap;
+    z-index: 100;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.gridpy-tooltip.visible {
+    opacity: 1;
+}
+
+/* Brush selection */
+.gridpy-overlay .brush .selection {
+    fill: rgba(100, 149, 237, 0.2);
+    stroke: #6495ed;
+    stroke-width: 1;
+}
+
+/* Theme: light (default) */
+.gridpy-theme-light {
+    background: #ffffff;
+}
+
+/* Theme: dark */
+.gridpy-theme-dark {
+    background: #1e1e1e;
+}
+
+.gridpy-theme-dark .gridpy-tooltip {
+    background: rgba(255, 255, 255, 0.9);
+    color: #1e1e1e;
+}

@@ -131,6 +131,7 @@ from grid_py._group import (
 # --- Renderer ---
 from grid_py._renderer_base import GridRenderer
 from grid_py.renderer import CairoRenderer
+from grid_py.renderer_web import WebRenderer
 
 # --- Drawing ---
 from grid_py._draw import (
