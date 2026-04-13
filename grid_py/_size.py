@@ -766,9 +766,9 @@ def _curve_width_details(grob: Any) -> Unit:
             return Unit(0, "inches")
         renderer = _get_renderer()
         if renderer is not None:
-            vp_px = renderer._vp_stack[-1][2]
+            _, _, vp_pw, _ = renderer.get_viewport_bounds()
             npc_width = float(px.max() - px.min())
-            return Unit(npc_width * vp_px / renderer.dpi, "inches")
+            return Unit(npc_width * vp_pw / renderer.dpi, "inches")
         return Unit(float(px.max() - px.min()), "npc")
     except Exception:
         return Unit(0, "inches")
@@ -808,9 +808,9 @@ def _curve_height_details(grob: Any) -> Unit:
             return Unit(0, "inches")
         renderer = _get_renderer()
         if renderer is not None:
-            vp_px = renderer._vp_stack[-1][3]
+            _, _, _, vp_ph = renderer.get_viewport_bounds()
             npc_height = float(py.max() - py.min())
-            return Unit(npc_height * vp_px / renderer.dpi, "inches")
+            return Unit(npc_height * vp_ph / renderer.dpi, "inches")
         return Unit(float(py.max() - py.min()), "npc")
     except Exception:
         return Unit(0, "inches")
