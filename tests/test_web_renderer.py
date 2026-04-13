@@ -412,6 +412,324 @@ class TestWebRendererOutput:
         assert "gridpy.render" in content
 
 
+class TestWebRendererCoordinateAccuracy:
+    """Verify that WebRenderer produces the same coordinate transforms as CairoRenderer."""
+
+    def test_rect_coordinates_match_cairo(self):
+        """draw_rect device coordinates must match CairoRenderer's _x/_y/_sx/_sy."""
+        from grid_py.renderer import CairoRenderer
+
+        for x, y, w, h in [(0.5, 0.5, 0.3, 0.2), (0.0, 0.0, 1.0, 1.0),
+                            (0.1, 0.9, 0.05, 0.05)]:
+            cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+            web_r = WebRenderer(width=7, height=5, dpi=150)
+            # Get device coords from both
+            cx = cairo_r._x(x - w * 0.5)
+            cy = cairo_r._y(y - h * 0.5 + h)
+            cw = cairo_r._sx(w)
+            ch = cairo_r._sy(h)
+
+            web_r.draw_rect(x, y, w, h)
+            node = web_r._scene_root.children[0]
+            d = node.to_dict()
+            assert abs(d["props"]["x"] - cx) < 1e-9, f"x mismatch for ({x},{y},{w},{h})"
+            assert abs(d["props"]["y"] - cy) < 1e-9, f"y mismatch for ({x},{y},{w},{h})"
+            assert abs(d["props"]["w"] - cw) < 1e-9, f"w mismatch for ({x},{y},{w},{h})"
+            assert abs(d["props"]["h"] - ch) < 1e-9, f"h mismatch for ({x},{y},{w},{h})"
+            web_r.new_page()
+
+    def test_circle_coordinates_match_cairo(self):
+        from grid_py.renderer import CairoRenderer
+        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+        web_r = WebRenderer(width=7, height=5, dpi=150)
+        cx = cairo_r._x(0.3)
+        cy = cairo_r._y(0.7)
+        cr = (cairo_r._sx(0.1) + cairo_r._sy(0.1)) / 2.0
+        web_r.draw_circle(0.3, 0.7, 0.1)
+        d = web_r._scene_root.children[0].to_dict()
+        assert abs(d["props"]["x"] - cx) < 1e-9
+        assert abs(d["props"]["y"] - cy) < 1e-9
+        assert abs(d["props"]["r"] - cr) < 1e-9
+
+    def test_text_coordinates_match_cairo(self):
+        from grid_py.renderer import CairoRenderer
+        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+        web_r = WebRenderer(width=7, height=5, dpi=150)
+        web_r.draw_text(0.5, 0.9, "hello")
+        d = web_r._scene_root.children[0].to_dict()
+        assert abs(d["props"]["x"] - cairo_r._x(0.5)) < 1e-9
+        assert abs(d["props"]["y"] - cairo_r._y(0.9)) < 1e-9
+
+    def test_points_coordinates_match_cairo(self):
+        from grid_py.renderer import CairoRenderer
+        xs = np.array([0.1, 0.5, 0.9])
+        ys = np.array([0.2, 0.6, 0.8])
+        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+        web_r = WebRenderer(width=7, height=5, dpi=150)
+        web_r.draw_points(xs, ys)
+        d = web_r._scene_root.children[0].to_dict()
+        for i in range(3):
+            assert abs(d["props"]["x"][i] - cairo_r._x(float(xs[i]))) < 1e-9
+            assert abs(d["props"]["y"][i] - cairo_r._y(float(ys[i]))) < 1e-9
+
+
+class TestWebRendererVectorizedGpar:
+    """Test that per-element gpar (vectorized colors, lwd, etc.) serializes correctly."""
+
+    def test_multi_color_serialization(self):
+        r = WebRenderer()
+        gp = Gpar(col=["red", "blue", "green"])
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
+        d = r._scene_root.children[0].to_dict()
+        assert isinstance(d["gpar"]["col"], list)
+        assert len(d["gpar"]["col"]) == 3
+        assert d["gpar"]["col"][0] == "red"
+
+    def test_multi_fill_serialization(self):
+        r = WebRenderer()
+        gp = Gpar(fill=["#FF0000", "#00FF00", "#0000FF"])
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
+        d = r._scene_root.children[0].to_dict()
+        assert isinstance(d["gpar"]["fill"], list)
+        assert len(d["gpar"]["fill"]) == 3
+
+    def test_multi_lwd_serialization(self):
+        r = WebRenderer()
+        gp = Gpar(lwd=[1.0, 2.0, 3.0])
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
+        d = r._scene_root.children[0].to_dict()
+        assert d["gpar"]["lwd"] == [1.0, 2.0, 3.0]
+
+    def test_single_element_list_unwrapped(self):
+        r = WebRenderer()
+        gp = Gpar(col=["red"])
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
+        d = r._scene_root.children[0].to_dict()
+        assert d["gpar"]["col"] == "red"  # Unwrapped, not ["red"]
+
+    def test_empty_list_gpar_rejected_by_gpar(self):
+        """Gpar rejects empty lists — this is correct R behaviour."""
+        with pytest.raises(ValueError, match="must not be length 0"):
+            Gpar(col=[])
+
+
+class TestWebRendererGradientPattern:
+    """Test gradient and pattern serialization into scene graph defs."""
+
+    def test_linear_gradient_in_fill(self):
+        from grid_py._patterns import LinearGradient
+        from grid_py._units import Unit
+        grad = LinearGradient(
+            colours=["red", "blue"], stops=[0.0, 1.0],
+            x1=Unit(0, "npc"), y1=Unit(0, "npc"),
+            x2=Unit(1, "npc"), y2=Unit(1, "npc"),
+        )
+        r = WebRenderer()
+        gp = Gpar(fill=grad)
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
+        d = r._scene_root.children[0].to_dict()
+        # Fill should be a url(#grad-N) reference
+        assert d["gpar"]["fill"].startswith("url(#grad-")
+        # Defs should have the gradient
+        assert len(r._defs.gradients) == 1
+        g = r._defs.gradients[0]
+        assert g["type"] == "linear"
+        assert g["colours"] == ["red", "blue"]
+        assert g["stops"] == [0.0, 1.0]
+
+    def test_radial_gradient_in_fill(self):
+        from grid_py._patterns import RadialGradient
+        from grid_py._units import Unit
+        grad = RadialGradient(
+            colours=["white", "black"], stops=[0.0, 1.0],
+            cx1=Unit(0.5, "npc"), cy1=Unit(0.5, "npc"), r1=Unit(0, "npc"),
+            cx2=Unit(0.5, "npc"), cy2=Unit(0.5, "npc"), r2=Unit(0.5, "npc"),
+        )
+        r = WebRenderer()
+        gp = Gpar(fill=grad)
+        r.draw_circle(0.5, 0.5, 0.3, gp=gp)
+        assert len(r._defs.gradients) == 1
+        assert r._defs.gradients[0]["type"] == "radial"
+
+
+class TestWebRendererClipping:
+    """Test that viewport clipping generates correct clip paths in defs."""
+
+    def test_clip_viewport_creates_def(self):
+        from grid_py._viewport import Viewport
+        r = WebRenderer(width=7, height=5)
+        vp = Viewport(name="clipped", x=0.5, y=0.5, width=0.5, height=0.5, clip=True)
+        r.push_viewport(vp)
+        # Should have a clip path in defs
+        assert len(r._defs.clip_paths) == 1
+        cp = r._defs.clip_paths[0]
+        assert "id" in cp
+        assert cp["w"] > 0
+        assert cp["h"] > 0
+        # Viewport node should reference it
+        vp_node = r._scene_root.children[0]
+        assert vp_node.clip_id == cp["id"]
+        r.pop_viewport()
+
+    def test_no_clip_no_def(self):
+        from grid_py._viewport import Viewport
+        r = WebRenderer(width=7, height=5)
+        vp = Viewport(name="unclipped", x=0.5, y=0.5, width=0.5, height=0.5)
+        r.push_viewport(vp)
+        assert len(r._defs.clip_paths) == 0
+        r.pop_viewport()
+
+
+class TestWebRendererNewPage:
+    """Test that new_page() completely resets all state."""
+
+    def test_new_page_resets_children(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        r.draw_circle(0.5, 0.5, 0.1)
+        assert len(r._scene_root.children) == 2
+        r.new_page()
+        assert len(r._scene_root.children) == 0
+
+    def test_new_page_resets_defs(self):
+        from grid_py._patterns import LinearGradient
+        from grid_py._units import Unit
+        r = WebRenderer()
+        grad = LinearGradient(colours=["red", "blue"], stops=[0.0, 1.0],
+                              x1=Unit(0, "npc"), y1=Unit(0, "npc"),
+                              x2=Unit(1, "npc"), y2=Unit(1, "npc"))
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=Gpar(fill=grad))
+        assert len(r._defs.gradients) == 1
+        r.new_page()
+        assert len(r._defs.gradients) == 0
+
+    def test_new_page_resets_viewport_stack(self):
+        from grid_py._viewport import Viewport
+        r = WebRenderer(width=7, height=5)
+        vp = Viewport(name="test", x=0.5, y=0.5, width=0.5, height=0.5)
+        r.push_viewport(vp)
+        assert len(r._vp_stack) == 2
+        r.new_page()
+        assert len(r._vp_stack) == 1
+        assert len(r._node_stack) == 1
+
+    def test_new_page_resets_id_generator(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        first_id = r._scene_root.children[0].node_id
+        r.new_page()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        second_id = r._scene_root.children[0].node_id
+        # After reset, IDs should restart (vp-0 takes first, grob gets next)
+        assert second_id == first_id  # both should be grob-1
+
+
+class TestWebRendererHTMLOutput:
+    """Verify HTML output structure and correctness."""
+
+    def test_html_contains_valid_json(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=Gpar(fill="red"))
+        html = r.to_html()
+        # Extract the JSON from the HTML
+        start = html.index("gridpy.render(")
+        # Find the JSON object (second argument)
+        bracket_start = html.index("{", start)
+        # Find matching closing — simple approach: use json_str from to_scene_json
+        json_str = r.to_scene_json()
+        assert json_str in html, "Scene graph JSON must be embedded in HTML"
+        # Verify it's valid JSON
+        parsed = json.loads(json_str)
+        assert parsed["version"] == 1
+
+    def test_html_contains_css(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        html = r.to_html()
+        assert "gridpy-container" in html
+        assert "gridpy-tooltip" in html
+        assert "gridpy-canvas" in html
+
+    def test_html_contains_js_runtime(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        html = r.to_html()
+        assert "var gridpy" in html
+        assert "function render" in html
+        assert "CANVAS_THRESHOLD" in html
+
+    def test_theme_dark_in_html(self):
+        r = WebRenderer(theme="dark")
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        html = r.to_html()
+        assert 'theme: "dark"' in html
+
+    def test_non_interactive_mode(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2)
+        html = r.to_html(interactive=False)
+        assert "interactive: false" in html
+
+
+class TestWebRendererEdgeCases:
+    """Edge cases that should not crash."""
+
+    def test_empty_scene_graph(self):
+        r = WebRenderer()
+        j = r.to_scene_json()
+        parsed = json.loads(j)
+        assert parsed["root"]["children"] == []
+
+    def test_draw_polygon_too_few_points(self):
+        r = WebRenderer()
+        r.draw_polygon(np.array([0.1, 0.2]), np.array([0.3, 0.4]))
+        assert len(r._scene_root.children) == 0  # Silently skipped
+
+    def test_draw_line_too_few_points(self):
+        r = WebRenderer()
+        r.draw_line(np.array([0.1]), np.array([0.2]))
+        assert len(r._scene_root.children) == 0  # Silently skipped
+
+    def test_draw_with_none_gpar(self):
+        r = WebRenderer()
+        r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=None)
+        d = r._scene_root.children[0].to_dict()
+        assert d["gpar"] == {}
+
+    def test_unicode_text(self):
+        r = WebRenderer()
+        r.draw_text(0.5, 0.5, "Hello 世界 🌍")
+        d = r._scene_root.children[0].to_dict()
+        assert d["props"]["label"] == "Hello 世界 🌍"
+        # Verify JSON roundtrip
+        j = r.to_scene_json()
+        parsed = json.loads(j)
+        assert parsed["root"]["children"][0]["props"]["label"] == "Hello 世界 🌍"
+
+    def test_zero_size_viewport(self):
+        from grid_py._viewport import Viewport
+        r = WebRenderer(width=7, height=5)
+        vp = Viewport(name="zero", x=0.5, y=0.5, width=0.0, height=0.0)
+        r.push_viewport(vp)
+        r.draw_rect(0.5, 0.5, 1.0, 1.0)
+        r.pop_viewport()
+        # Should not crash
+        j = r.to_scene_json()
+        json.loads(j)  # Valid JSON
+
+    def test_many_grobs_performance(self):
+        """Verify we can handle a large number of grobs without issue."""
+        r = WebRenderer()
+        xs = np.random.rand(5000)
+        ys = np.random.rand(5000)
+        r.draw_points(xs, ys)
+        d = r._scene_root.children[0].to_dict()
+        assert len(d["props"]["x"]) == 5000
+        # JSON should be serializable
+        j = r.to_scene_json()
+        assert len(j) > 10000
+
+
 class TestWebRendererFullPipeline:
     """Test WebRenderer through the standard grid_py drawing pipeline."""
 

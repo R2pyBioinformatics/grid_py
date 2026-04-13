@@ -70,10 +70,21 @@ def _serialise_gpar(gp: Optional[Gpar], defs: DefsCollection, id_gen: _IdGenerat
         val = gp.get(key, None)
         if val is None:
             continue
-        # Unwrap single-element lists
-        if isinstance(val, (list, tuple, np.ndarray)):
+        # Unwrap single-element lists/arrays to scalar
+        if isinstance(val, (list, tuple, np.ndarray)) and not isinstance(val, str):
+            if len(val) == 0:
+                continue
             if len(val) == 1:
                 val = val[0]
+            else:
+                # Multi-element: keep as list for per-element rendering
+                if key in ("col", "fill"):
+                    result[key] = [_parse_colour_str(v) for v in val]
+                elif key in ("lwd", "fontsize", "alpha"):
+                    result[key] = [float(v) for v in val]
+                else:
+                    result[key] = [str(v) for v in val]
+                continue
         if key in ("col", "fill"):
             if isinstance(val, LinearGradient):
                 grad_id = _register_gradient(val, defs, id_gen)
@@ -193,8 +204,34 @@ def _array_to_data_uri(image: Any) -> str:
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         return f"data:image/png;base64,{b64}"
     except ImportError:
-        # Minimal fallback: encode raw pixel data
-        return "data:image/png;base64,"
+        # Fallback: manually encode a minimal valid PNG from raw RGBA data
+        import struct, zlib
+        if img_array.ndim == 2:
+            h_img, w_img = img_array.shape
+            rgba = np.stack([img_array]*3 + [np.full_like(img_array, 255)], axis=-1)
+        elif img_array.ndim == 3 and img_array.shape[2] == 3:
+            h_img, w_img = img_array.shape[:2]
+            rgba = np.concatenate(
+                [img_array, np.full((*img_array.shape[:2], 1), 255, dtype=np.uint8)],
+                axis=2)
+        elif img_array.ndim == 3 and img_array.shape[2] == 4:
+            h_img, w_img = img_array.shape[:2]
+            rgba = img_array
+        else:
+            return "data:image/png;base64,"
+        # Build minimal PNG (uncompressed)
+        def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+            c = chunk_type + data
+            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr = struct.pack(">IIBBBBB", w_img, h_img, 8, 6, 0, 0, 0)
+        raw_rows = b""
+        for row in range(h_img):
+            raw_rows += b"\x00" + rgba[row].tobytes()
+        idat = zlib.compress(raw_rows)
+        png_bytes = sig + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        return f"data:image/png;base64,{b64}"
 
 
 # ---------------------------------------------------------------------------
