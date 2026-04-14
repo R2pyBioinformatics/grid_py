@@ -536,14 +536,27 @@ def _calc_xspline_points(
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Evaluate an X-spline through the given control points.
 
-    Full implementation of the Blanc & Schlick (1995) X-spline algorithm,
-    matching R's ``GEXspline()`` in the graphics engine.
+    .. note:: **Approximate implementation.**
 
-    The *shape* parameter controls the blending per control point:
-    - ``shape = -1``: B-spline-like approximation (curve does not pass
-      through the control point).
-    - ``shape =  0``: Catmull-Rom interpolation.
-    - ``shape =  1``: Tight interpolation (sharp corners possible).
+       The *shape* parameter controls the blending per control point:
+
+       - ``shape = -1``: B-spline-like approximation (does not pass through).
+       - ``shape =  0``: Catmull-Rom interpolation (exact).
+       - ``shape =  1``: Tight/linear interpolation (sharp corners).
+
+       At the three extremes (``-1``, ``0``, ``+1``) the output is correct.
+       For intermediate values the current implementation linearly blends
+       between Catmull-Rom / B-spline / linear bases, which is a reasonable
+       approximation but **not** the precise algebraic blending functions
+       defined in the Blanc & Schlick paper.
+
+    .. todo:: **Blanc & Schlick 1995 precise blending functions.**
+
+       Replace the linear-interpolation-of-bases approach with the exact
+       ``f_blend`` / ``g_blend`` / ``h_blend`` polynomial blending
+       functions from the original paper (and as implemented in R's
+       ``src/main/xspline.c``).  The current approximation diverges from
+       R's ``GEXspline()`` at intermediate shape values (e.g. shape=0.3).
 
     Parameters
     ----------
@@ -567,6 +580,8 @@ def _calc_xspline_points(
     ----------
     Blanc, C. and Schlick, C. (1995).  X-splines: A spline model designed
     for the end-user.  *Proceedings of SIGGRAPH 95*, pp. 377-386.
+
+    R implementation: ``src/main/xspline.c`` (R core, not grid package).
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -600,75 +615,12 @@ def _calc_xspline_points(
         s = np.concatenate([s, s[:3]])
         n = len(x)
 
-    # ---- Blanc & Schlick X-spline basis functions ----
-
-    def _h(t: float, q: float) -> float:
-        """X-spline blending function.
-
-        For q >= 0 (interpolating): h(t,q) uses a rational form.
-        For q < 0 (approximating): h(t,q) uses a polynomial form.
-        Both are defined for t in [0, 1].
-        """
-        if q >= 0:
-            # Interpolating form (eq. from the paper)
-            # h(t,q) = t^2 (3 - 2t) + q * t(1-t)^2    for shape >= 0
-            # Actually the full X-spline basis:
-            # For s_i >= 0: "tension" knot
-            #   f(t, q) = t^4/2 + 2*t^3 + ... (see below)
-            pass
-        # Use the unified polynomial form from Blanc & Schlick:
-        #
-        # For each segment between knots k_i and k_{i+1}, the curve is
-        # influenced by 4 control points: P_{i-1}, P_i, P_{i+1}, P_{i+2}.
-        # The blending functions depend on the shape at each of these points.
-        #
-        # The basis function for a control point with shape q at
-        # normalised parameter t in [0, 1]:
-        #
-        # When q > 0 (interpolating, "tension"):
-        #   g_+(t, q) = t * (q * t^3 - 2*q*t^2 + (2*q-1)*t - (q-1)) / 2
-        #
-        # When q < 0 (approximating, "bias"):
-        #   g_-(t, q) = -q * t^4/6  (used as part of the full basis)
-        #
-        # When q = 0 (Catmull-Rom):
-        #   Standard Catmull-Rom basis functions.
-        return 0.0  # Placeholder, actual computation below
-
-    def _xspline_basis(t: float, s_val: float) -> float:
-        """Compute f(t, s) basis from the X-spline paper.
-
-        For s >= 0 (interpolating):
-            f(t,s) = s * (2*t^3 - 3*t^2 + 1) + (1-s) * (t^3 - t^2)
-            but only as one part of the full 4-point blend.
-
-        For s < 0 (approximating):
-            f(t,s) = (-s) * (t^3 - 3*t^2 + 3*t - 1) / 6  [B-spline-like]
-        """
-        # This follows R's engine implementation which uses a different
-        # but equivalent formulation based on the "A" and "B" functions.
-        if s_val > 0:
-            # Interpolating: blend between Catmull-Rom (s=0) and sharp (s=1)
-            # Using the standard X-spline tension form
-            p = 2 * s_val
-            t2 = t * t
-            t3 = t2 * t
-            return (p * t3 - p * t2) * 0.5 + t3 - t2
-        elif s_val < 0:
-            # Approximating: blend between Catmull-Rom (s=0) and B-spline (s=-1)
-            neg_s = -s_val
-            t2 = t * t
-            t3 = t2 * t
-            t4 = t3 * t
-            # Uniform B-spline basis component
-            return neg_s * (t4 - 2*t3 + t2) / 6.0
-        else:
-            return 0.0
-
-    # ---- Evaluate the spline using the proper 4-point window ----
-    # For each segment [i, i+1] (where the curve goes from P_i to P_{i+1}),
-    # we use control points P_{i-1}, P_i, P_{i+1}, P_{i+2}.
-    # The blending is done with a Catmull-Rom base, modulated by shape.
+    # ---- Evaluate the spline using a 4-point sliding window ----
+    # TODO(Blanc & Schlick 1995): replace the linear blending below with
+    # the exact f_blend/g_blend/h_blend polynomials from R src/main/xspline.c.
+    # Current approach: Catmull-Rom base, linearly blended toward B-spline
+    # (shape<0) or linear (shape>0).  Exact at shape=-1, 0, +1; approximate
+    # at intermediate values.
 
     n_seg = n - 3  # With replicated ends, we have n-3 valid segments
     if n_seg < 1:
