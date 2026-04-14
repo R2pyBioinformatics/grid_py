@@ -1,6 +1,6 @@
 """Core drawing engine for grid_py -- Python port of R's grid drawing functions.
 
-This module handles rendering grobs via :class:`CairoRenderer`, porting
+This module handles rendering grobs via a :class:`GridRenderer` backend, porting
 functionality from R's ``grid/R/grid.R`` and ``grid/R/grob.R``.
 
 The central entry point is :func:`grid_draw`, which performs S3-like dispatch
@@ -141,7 +141,7 @@ def _render_grob(
     gp: Optional[Gpar] = None,
     transform: Optional[np.ndarray] = None,
 ) -> None:
-    """Render a single grob via the :class:`CairoRenderer`.
+    """Render a single grob via the current :class:`GridRenderer` backend.
 
     Dispatches on ``grob._grid_class`` to call the appropriate renderer
     method.
@@ -150,8 +150,8 @@ def _render_grob(
     ----------
     grob : Grob
         The graphical object to render.
-    renderer : CairoRenderer
-        The Cairo renderer.
+    renderer : GridRenderer
+        The rendering backend.
     gp : Gpar or None, optional
         Resolved graphical parameters (merged from context + grob).
     transform : numpy.ndarray or None, optional
@@ -496,7 +496,7 @@ def _draw_grob(x: Grob) -> None:
         x = x.make_content()
         x.draw_details(recording=False)
 
-        # Render to Cairo
+        # Render via backend
         renderer = state.get_renderer()
         if renderer is not None:
             merged_gp = _merge_gpar(state.get_gpar(), x.gp)
@@ -739,7 +739,7 @@ def grid_newpage(
     """Clear the surface and start a fresh page.
 
     This is equivalent to R's ``grid.newpage()``.  If no
-    :class:`CairoRenderer` currently exists, a new one is created.
+    renderer currently exists, a default :class:`CairoRenderer` is created.
     The viewport stack is reset to the root viewport.
 
     Parameters

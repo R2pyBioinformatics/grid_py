@@ -2,8 +2,8 @@
 
 This module provides the :class:`GridState` singleton that manages the
 viewport tree, display list, graphical-parameter inheritance stack, and
-the binding to a :class:`CairoRenderer`.  It replaces the C-level
-``GridState`` struct found in R's *grid* package.
+the binding to a rendering backend (:class:`GridRenderer` subclass).
+It replaces the C-level ``GridState`` struct found in R's *grid* package.
 
 .. note::
    Viewport classes are **not** imported here to avoid circular
@@ -153,7 +153,7 @@ class GridState:
     """Singleton holding the global grid graphics state.
 
     Manages the viewport tree, display list, graphical-parameter
-    inheritance stack, and the connection to a Cairo renderer
+    inheritance stack, and the connection to a rendering backend
     (``Figure`` / ``Axes``).
 
     Attributes
@@ -173,7 +173,7 @@ class GridState:
     _device_height_cm : float
         Device height in centimetres.
     _renderer : Optional[Any]
-        :class:`CairoRenderer` reference (or ``None``).
+        :class:`GridRenderer` subclass instance (or ``None``).
 
     Examples
     --------
@@ -563,12 +563,13 @@ class GridState:
         width_cm: float = _DEFAULT_DEVICE_WIDTH_CM,
         height_cm: float = _DEFAULT_DEVICE_HEIGHT_CM,
     ) -> None:
-        """Bind the state to a :class:`CairoRenderer`.
+        """Bind the state to a rendering backend.
 
         Parameters
         ----------
-        renderer : CairoRenderer
-            The Cairo renderer instance.
+        renderer : GridRenderer
+            A :class:`GridRenderer` subclass instance (e.g.
+            ``CairoRenderer`` or ``WebRenderer``).
         width_cm : float, optional
             Device width in centimetres (default ~7 in).
         height_cm : float, optional
@@ -579,11 +580,11 @@ class GridState:
         self._device_height_cm = float(height_cm)
 
     def get_renderer(self) -> Any:
-        """Return the current :class:`CairoRenderer`.
+        """Return the current rendering backend.
 
         Returns
         -------
-        CairoRenderer or None
+        GridRenderer or None
             The renderer, or ``None`` if :meth:`init_device` has not
             been called.
         """
