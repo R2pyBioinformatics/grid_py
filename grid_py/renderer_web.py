@@ -34,30 +34,7 @@ __all__ = ["WebRenderer"]
 # Colour / Gpar serialisation helpers
 # ---------------------------------------------------------------------------
 
-_NAMED_COLOURS = {
-    "transparent", "na", "none", "NA", "",
-}
-
-
-def _parse_colour_str(c: Any) -> Optional[str]:
-    """Normalise a colour value to a CSS-compatible string, or ``None``."""
-    if c is None:
-        return None
-    if isinstance(c, (list, tuple)):
-        if len(c) >= 4:
-            return f"rgba({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)},{c[3]:.3f})"
-        if len(c) == 3:
-            return f"rgb({int(c[0]*255)},{int(c[1]*255)},{int(c[2]*255)})"
-        c = c[0]
-    if isinstance(c, str):
-        s = c.strip().lower()
-        if s in _NAMED_COLOURS:
-            return "transparent"
-        return c
-    if isinstance(c, (int, float)):
-        v = int(float(c) * 255)
-        return f"rgb({v},{v},{v})"
-    return str(c)
+from ._colour import colour_to_css as _parse_colour_str
 
 
 def _serialise_gpar(gp: Optional[Gpar], defs: DefsCollection, id_gen: _IdGenerator) -> dict:

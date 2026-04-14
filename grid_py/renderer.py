@@ -25,91 +25,15 @@ except ImportError:
         "Install it with:  conda install -c conda-forge pycairo"
     )
 
+from ._colour import parse_r_colour as _parse_colour
 from ._gpar import Gpar
 from ._patterns import LinearGradient, RadialGradient, Pattern
 from ._renderer_base import GridRenderer
 
 __all__ = ["CairoRenderer"]
 
-# ---------------------------------------------------------------------------
-# R colour helpers
-# ---------------------------------------------------------------------------
 
-import re as _re
-
-_GREY_RE = _re.compile(r"^gr[ae]y(\d{1,3})$")
-
-# Minimal named-colour table (R's grDevices::colors subset most commonly
-# encountered in ggplot2 / grid themes).
-_NAMED_COLOURS: Dict[str, Tuple[float, float, float]] = {
-    "black": (0.0, 0.0, 0.0),
-    "white": (1.0, 1.0, 1.0),
-    "red": (1.0, 0.0, 0.0),
-    "green": (0.0, 1.0, 0.0),
-    "blue": (0.0, 0.0, 1.0),
-    "yellow": (1.0, 1.0, 0.0),
-    "cyan": (0.0, 1.0, 1.0),
-    "magenta": (1.0, 0.0, 1.0),
-    "orange": (1.0, 0.6471, 0.0),
-    "purple": (0.6275, 0.1255, 0.9412),
-    "pink": (1.0, 0.7529, 0.7961),
-    "brown": (0.6471, 0.1647, 0.1647),
-    "grey": (0.7451, 0.7451, 0.7451),
-    "gray": (0.7451, 0.7451, 0.7451),
-    "transparent": (0.0, 0.0, 0.0),  # handled specially via alpha
-    "NA": (0.0, 0.0, 0.0),
-}
-
-
-def _parse_colour(c: Any) -> Tuple[float, float, float, float]:
-    """Convert an R-style colour specification to (r, g, b, a) in [0, 1]."""
-    if c is None:
-        return (0.0, 0.0, 0.0, 1.0)
-
-    if isinstance(c, (list, tuple)):
-        if len(c) >= 4:
-            return (float(c[0]), float(c[1]), float(c[2]), float(c[3]))
-        if len(c) == 3:
-            return (float(c[0]), float(c[1]), float(c[2]), 1.0)
-        # Single-element list
-        c = c[0]
-
-    if isinstance(c, str):
-        s = c.strip()
-        if s.lower() in ("transparent", "na", "none", ""):
-            return (0.0, 0.0, 0.0, 0.0)
-        # grey<N> / gray<N>
-        m = _GREY_RE.match(s)
-        if m:
-            v = int(m.group(1)) / 100.0
-            return (v, v, v, 1.0)
-        # Hex colour  #RRGGBB or #RRGGBBAA
-        if s.startswith("#"):
-            h = s[1:]
-            if len(h) == 6:
-                r = int(h[0:2], 16) / 255.0
-                g = int(h[2:4], 16) / 255.0
-                b = int(h[4:6], 16) / 255.0
-                return (r, g, b, 1.0)
-            if len(h) == 8:
-                r = int(h[0:2], 16) / 255.0
-                g = int(h[2:4], 16) / 255.0
-                b = int(h[4:6], 16) / 255.0
-                a = int(h[6:8], 16) / 255.0
-                return (r, g, b, a)
-        # Named colour
-        low = s.lower()
-        if low in _NAMED_COLOURS:
-            rgb = _NAMED_COLOURS[low]
-            return (rgb[0], rgb[1], rgb[2], 1.0)
-
-    # Already numeric (float grey level, etc.)
-    if isinstance(c, (int, float)):
-        v = float(c)
-        return (v, v, v, 1.0)
-
-    # Fallback: black
-    return (0.0, 0.0, 0.0, 1.0)
+# _parse_colour is imported from ._colour (shared R colour table)
 
 
 # ---------------------------------------------------------------------------

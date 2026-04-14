@@ -361,8 +361,9 @@ class TestParseColour:
 
     def test_grey_number(self):
         r, g, b, a = _parse_colour("grey50")
-        assert r == pytest.approx(0.5)
-        assert g == pytest.approx(0.5)
+        # R's grey50 = #7F7F7F = 127/255 ≈ 0.498
+        assert r == pytest.approx(0x7F / 255.0)
+        assert g == pytest.approx(0x7F / 255.0)
 
     def test_gray_variant(self):
         assert _parse_colour("gray0") == (0.0, 0.0, 0.0, 1.0)

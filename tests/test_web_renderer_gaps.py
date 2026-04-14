@@ -90,12 +90,13 @@ class TestFonttoolsMetrics:
 
 class TestParseColourStr:
     def test_named_colour(self):
-        assert _parse_colour_str("red") == "red"
-        assert _parse_colour_str("blue") == "blue"
+        # Colours are now normalised through the shared R colour table
+        assert _parse_colour_str("red") == "rgb(255,0,0)"
+        assert _parse_colour_str("blue") == "rgb(0,0,255)"
 
     def test_hex_colour(self):
-        assert _parse_colour_str("#FF0000") == "#FF0000"
-        assert _parse_colour_str("#00FF00FF") == "#00FF00FF"
+        assert _parse_colour_str("#FF0000") == "rgb(255,0,0)"
+        assert _parse_colour_str("#00FF00FF") == "rgb(0,255,0)"
 
     def test_transparent(self):
         assert _parse_colour_str("transparent") == "transparent"
@@ -123,7 +124,7 @@ class TestParseColourStr:
 
     def test_single_element_list(self):
         result = _parse_colour_str(["red"])
-        assert result == "red"
+        assert result == "rgb(255,0,0)"
 
 
 # ===================================================================== #
@@ -139,7 +140,7 @@ class TestGparSerialisation:
         gp = Gpar(col=np.array(["red", "blue"]))
         r = _serialise_gpar(gp, self.defs, self.id_gen)
         assert isinstance(r["col"], list)
-        assert r["col"] == ["red", "blue"]
+        assert r["col"] == ["rgb(255,0,0)", "rgb(0,0,255)"]
 
     def test_numpy_scalar_fontsize(self):
         gp = Gpar(fontsize=np.float64(14.0))

@@ -509,11 +509,13 @@ class TestParseColour:
 
     def test_grey_number(self):
         r, g, b, a = _parse_colour("grey50")
-        assert r == pytest.approx(0.5)
+        # R's grey50 = #7F7F7F = 127/255 ≈ 0.498
+        assert r == pytest.approx(0x7F / 255.0)
 
     def test_gray_number(self):
         r, g, b, a = _parse_colour("gray25")
-        assert r == pytest.approx(0.25)
+        # R's gray25 = #404040 = 64/255 ≈ 0.251
+        assert r == pytest.approx(0x40 / 255.0)
 
     def test_named_colour(self):
         r, g, b, a = _parse_colour("red")

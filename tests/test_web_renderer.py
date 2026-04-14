@@ -294,8 +294,9 @@ class TestWebRendererGpar:
         gp = Gpar(fill="red", col="blue", lwd=2, fontsize=14, alpha=0.8)
         r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
         d = r._scene_root.children[0].to_dict()
-        assert d["gpar"]["fill"] == "red"
-        assert d["gpar"]["col"] == "blue"
+        # Colours are now normalised through the shared R colour table
+        assert d["gpar"]["fill"] == "rgb(255,0,0)"
+        assert d["gpar"]["col"] == "rgb(0,0,255)"
         assert d["gpar"]["lwd"] == 2.0
         assert d["gpar"]["fontsize"] == 14.0
         assert d["gpar"]["alpha"] == 0.8
@@ -483,7 +484,7 @@ class TestWebRendererVectorizedGpar:
         d = r._scene_root.children[0].to_dict()
         assert isinstance(d["gpar"]["col"], list)
         assert len(d["gpar"]["col"]) == 3
-        assert d["gpar"]["col"][0] == "red"
+        assert d["gpar"]["col"][0] == "rgb(255,0,0)"
 
     def test_multi_fill_serialization(self):
         r = WebRenderer()
@@ -505,7 +506,7 @@ class TestWebRendererVectorizedGpar:
         gp = Gpar(col=["red"])
         r.draw_rect(0.5, 0.5, 0.3, 0.2, gp=gp)
         d = r._scene_root.children[0].to_dict()
-        assert d["gpar"]["col"] == "red"  # Unwrapped, not ["red"]
+        assert d["gpar"]["col"] == "rgb(255,0,0)"  # Unwrapped and normalised
 
     def test_empty_list_gpar_rejected_by_gpar(self):
         """Gpar rejects empty lists — this is correct R behaviour."""
