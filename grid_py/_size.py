@@ -185,32 +185,78 @@ def _normalise_labels(grob: Any) -> list:
 
 # -- text grob (R: primitives.R:1430-1470) ---------------------------------
 
-def _text_width_details(grob: Any) -> Unit:
-    """Width of a text grob: max width across all labels.
+def _text_bbox(grob: Any) -> tuple:
+    """Compute (width, height) of the text bounding box in inches.
 
-    Mirrors ``widthDetails.text`` (R ``primitives.R:1430``).
+    Port of R ``C_textBounds``: measures text extents and applies
+    rotation to compute the axis-aligned bounding box.  This is what
+    R's ``widthDetails.text`` and ``heightDetails.text`` use internally.
     """
+    import math
     labels = _normalise_labels(grob)
     gp = getattr(grob, "gp", None)
+    rot = float(getattr(grob, "rot", 0.0))
+
     if not labels:
-        return Unit(0, "inches")
-    max_width = 0.0
+        return (0.0, 0.0)
+
+    xmin = float("inf")
+    xmax = float("-inf")
+    ymin = float("inf")
+    ymax = float("-inf")
+
     for lab in labels:
         m = calc_string_metric(lab, gp=gp)
-        max_width = max(max_width, m["width"])
-    return Unit(max_width, "inches")
+        w = m["width"]
+        h = m["ascent"] + m["descent"]
+
+        if rot == 0.0:
+            # No rotation: bbox is just the text extent
+            corners_x = [0, w, w, 0]
+            corners_y = [0, 0, h, h]
+        else:
+            rad = math.radians(rot)
+            cos_r = math.cos(rad)
+            sin_r = math.sin(rad)
+            # Four corners of the unrotated text rectangle
+            corners = [(0, 0), (w, 0), (w, h), (0, h)]
+            corners_x = [cx * cos_r - cy * sin_r for cx, cy in corners]
+            corners_y = [cx * sin_r + cy * cos_r for cx, cy in corners]
+
+        for cx in corners_x:
+            if cx < xmin:
+                xmin = cx
+            if cx > xmax:
+                xmax = cx
+        for cy in corners_y:
+            if cy < ymin:
+                ymin = cy
+            if cy > ymax:
+                ymax = cy
+
+    if xmin == float("inf"):
+        return (0.0, 0.0)
+    return (xmax - xmin, ymax - ymin)
+
+
+def _text_width_details(grob: Any) -> Unit:
+    """Width of a text grob: rotated bounding box width.
+
+    Port of R ``widthDetails.text`` (primitives.R:1430) which calls
+    ``C_textBounds`` with rotation to compute the axis-aligned bbox.
+    """
+    w, _ = _text_bbox(grob)
+    return Unit(w, "inches")
 
 
 def _text_height_details(grob: Any) -> Unit:
-    """Height of a text grob: ascent + descent of the first label.
+    """Height of a text grob: rotated bounding box height.
 
-    Mirrors ``heightDetails.text`` (R ``primitives.R:1442``).
+    Port of R ``heightDetails.text`` (primitives.R:1442) which calls
+    ``C_textBounds`` with rotation to compute the axis-aligned bbox.
     """
-    labels = _normalise_labels(grob)
-    gp = getattr(grob, "gp", None)
-    text = labels[0] if labels else ""
-    m = calc_string_metric(text, gp=gp)
-    return Unit(m["ascent"] + m["descent"], "inches")
+    _, h = _text_bbox(grob)
+    return Unit(h, "inches")
 
 
 def _text_ascent_details(grob: Any) -> Unit:

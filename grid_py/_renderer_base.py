@@ -209,37 +209,12 @@ class GridRenderer(ABC):
         layout_pos_row = getattr(vp, "_layout_pos_row", None)
         layout_pos_col = getattr(vp, "_layout_pos_col", None)
 
-        # --- Case 1: Layout viewport ---
-        if layout is not None:
-            # Layout viewport uses same bounds as parent but stores grid info.
-            # Compute grid in device units for layout children.
-            w_dev = parent_vtr.width_cm / 2.54 * self._dev_units_per_inch
-            h_dev = parent_vtr.height_cm / 2.54 * self._dev_units_per_inch
-            respect = getattr(layout, "respect", False)
-            grid_info = self._compute_grid(layout, w_dev, h_dev, respect=bool(respect))
-
-            # The layout viewport itself has the same transform as parent
-            # but we create a new VTR with the vp's xscale/yscale
-            xscale = getattr(vp, "_xscale", [0.0, 1.0])
-            yscale = getattr(vp, "_yscale", [0.0, 1.0])
-            vtr = ViewportTransformResult(
-                width_cm=parent_vtr.width_cm,
-                height_cm=parent_vtr.height_cm,
-                rotation_angle=parent_vtr.rotation_angle,
-                transform=parent_vtr.transform.copy(),
-                vpc=ViewportContext(
-                    xscale=(float(xscale[0]), float(xscale[1])),
-                    yscale=(float(yscale[0]), float(yscale[1])),
-                ),
-            )
-            self._vp_transform_stack.append(vtr)
-            self._vp_obj_stack.append(vp)
-            self._layout_stack.append(grid_info)
-            self._clip_stack.append(False)
-            self._layout_depth_stack.append(len(self._vp_transform_stack))
-            return
-
-        # --- Case 2: Layout-positioned child ---
+        # --- Case 2 (check first): Layout-positioned child ---
+        # Must be checked BEFORE Case 1: a viewport can have BOTH
+        # layout_pos (its position in the parent's layout) AND its own
+        # layout (for its children).  In R, layout_pos determines the
+        # viewport's own size/position first, then the layout applies
+        # within that region.
         if layout_pos_row is not None and layout_pos_col is not None:
             if self._layout_stack:
                 grid = self._layout_stack[-1]
@@ -298,7 +273,50 @@ class GridRenderer(ABC):
                 self._vp_transform_stack.append(vtr)
                 self._vp_obj_stack.append(vp)
                 self._do_apply_clip_vtr(vp, vtr)
+
+                # If this layout-positioned viewport ALSO has its own
+                # layout, compute the grid within the cell's bounds so
+                # that its children can use layout_pos_row/col.
+                if layout is not None:
+                    w_dev = cell_w_dev
+                    h_dev = cell_h_dev
+                    respect = getattr(layout, "respect", False)
+                    grid_info = self._compute_grid(
+                        layout, w_dev, h_dev, respect=bool(respect))
+                    self._layout_stack.append(grid_info)
+                    self._layout_depth_stack.append(
+                        len(self._vp_transform_stack))
                 return
+
+        # --- Case 1: Layout viewport (no layout_pos) ---
+        if layout is not None:
+            # Layout viewport uses same bounds as parent but stores grid info.
+            # Compute grid in device units for layout children.
+            w_dev = parent_vtr.width_cm / 2.54 * self._dev_units_per_inch
+            h_dev = parent_vtr.height_cm / 2.54 * self._dev_units_per_inch
+            respect = getattr(layout, "respect", False)
+            grid_info = self._compute_grid(layout, w_dev, h_dev, respect=bool(respect))
+
+            # The layout viewport itself has the same transform as parent
+            # but we create a new VTR with the vp's xscale/yscale
+            xscale = getattr(vp, "_xscale", [0.0, 1.0])
+            yscale = getattr(vp, "_yscale", [0.0, 1.0])
+            vtr = ViewportTransformResult(
+                width_cm=parent_vtr.width_cm,
+                height_cm=parent_vtr.height_cm,
+                rotation_angle=parent_vtr.rotation_angle,
+                transform=parent_vtr.transform.copy(),
+                vpc=ViewportContext(
+                    xscale=(float(xscale[0]), float(xscale[1])),
+                    yscale=(float(yscale[0]), float(yscale[1])),
+                ),
+            )
+            self._vp_transform_stack.append(vtr)
+            self._vp_obj_stack.append(vp)
+            self._layout_stack.append(grid_info)
+            self._clip_stack.append(False)
+            self._layout_depth_stack.append(len(self._vp_transform_stack))
+            return
 
         # --- Case 3: Simple viewport with x/y/width/height ---
         # Use calc_viewport_transform (port of R's calcViewportTransform)
