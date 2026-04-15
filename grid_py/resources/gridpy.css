@@ -20,12 +20,7 @@
     pointer-events: none;
 }
 
-.gridpy-svg .grob-interactive {
-    pointer-events: all;
-}
-
 .gridpy-svg text {
-    pointer-events: none;
     user-select: none;
 }
 

@@ -175,16 +175,16 @@ var gridpy = (function () {
 
     // ---- SVG rendering ----------------------------------------------------
 
-    function renderSvgNode(node, parentG) {
+    function renderSvgNode(node, parentG, state) {
         if (!node) return;
         if (node.type === "viewport") {
-            renderSvgViewport(node, parentG);
+            renderSvgViewport(node, parentG, state);
         } else {
-            drawSvgGrub(node, parentG);
+            drawSvgGrub(node, parentG, state);
         }
     }
 
-    function renderSvgViewport(vpNode, parentG) {
+    function renderSvgViewport(vpNode, parentG, state) {
         var g = parentG.append("g")
             .attr("class", "vp-" + (vpNode.name || ""))
             .attr("data-viewport", vpNode.name || "");
@@ -195,11 +195,11 @@ var gridpy = (function () {
             g.attr("mask", "url(#" + vpNode.mask_id + ")");
         }
         (vpNode.children || []).forEach(function (child) {
-            renderSvgNode(child, g);
+            renderSvgNode(child, g, state);
         });
     }
 
-    function drawSvgGrub(node, parentG) {
+    function drawSvgGrub(node, parentG, state) {
         var p = node.props || {};
         switch (node.type) {
             case "rect":
@@ -241,7 +241,7 @@ var gridpy = (function () {
                 break;
 
             case "points":
-                drawSvgPoints(node, parentG);
+                drawSvgPoints(node, parentG, state);
                 break;
 
             case "polyline":
@@ -273,7 +273,7 @@ var gridpy = (function () {
             case "compound_stroke":
             case "compound_fill":
             case "compound_fill_stroke":
-                drawSvgCompound(node, parentG);
+                drawSvgCompound(node, parentG, state);
                 break;
 
             default:
@@ -281,7 +281,7 @@ var gridpy = (function () {
         }
     }
 
-    function drawSvgPoints(node, parentG) {
+    function drawSvgPoints(node, parentG, state) {
         var p = node.props;
         var xs = p.x || [], ys = p.y || [];
         var r = (p.size || 1) * 2;
@@ -289,7 +289,7 @@ var gridpy = (function () {
         var colArr = Array.isArray(gpar.col) ? gpar.col : null;
         var fillArr = Array.isArray(gpar.fill) ? gpar.fill : null;
         var lwdArr = Array.isArray(gpar.lwd) ? gpar.lwd : null;
-        var g = parentG.append("g").attr("class", "grob-points grob-interactive");
+        var g = parentG.append("g").attr("class", "grob-points");
         for (var i = 0; i < xs.length; i++) {
             var c = g.append("circle")
                 .attr("cx", xs[i]).attr("cy", ys[i]).attr("r", r)
@@ -300,13 +300,13 @@ var gridpy = (function () {
             if (colArr) c.attr("stroke", colArr[i % colArr.length] || "none");
             if (fillArr) c.attr("fill", fillArr[i % fillArr.length] || "none");
             if (lwdArr) c.attr("stroke-width", lwdArr[i % lwdArr.length]);
-            if (node.data) {
-                var row = {};
-                for (var key in node.data) {
-                    row[key] = Array.isArray(node.data[key])
-                        ? node.data[key][i] : node.data[key];
-                }
-                c.attr("data-row", JSON.stringify(row));
+            // Register in spatial index for tooltip hit-testing
+            if (state) {
+                state.hitItems.push({
+                    x: xs[i], y: ys[i], r: r,
+                    id: node.id, index: i, layer: "svg",
+                    data: node.data ? extractRow(node.data, i) : null
+                });
             }
         }
     }
@@ -375,13 +375,13 @@ var gridpy = (function () {
         }
     }
 
-    function drawSvgCompound(node, parentG) {
+    function drawSvgCompound(node, parentG, state) {
         // compound_stroke / compound_fill / compound_fill_stroke
         // Render sub-paths as a combined <path>
         var subPaths = (node.props || {}).sub_paths || [];
         var g = parentG.append("g").attr("class", "compound-path");
         subPaths.forEach(function (sub) {
-            drawSvgGrub(sub, g);
+            drawSvgGrub(sub, g, state);
         });
         // Apply overall stroke/fill from the compound node's gpar
         applyGparSvg(g, node.gpar);
@@ -482,9 +482,9 @@ var gridpy = (function () {
                     ctx.strokeStyle = colArr[i % colArr.length] || "rgba(0,0,0,0)";
                     ctx.stroke();
                 }
-                state.canvasItems.push({
+                state.hitItems.push({
                     x: xs[i], y: ys[i], r: r,
-                    id: node.id, index: i,
+                    id: node.id, index: i, layer: "canvas",
                     data: node.data ? extractRow(node.data, i) : null
                 });
             }
@@ -494,9 +494,9 @@ var gridpy = (function () {
             for (var j = 0; j < xs.length; j++) {
                 ctx.moveTo(xs[j] + r, ys[j]);
                 ctx.arc(xs[j], ys[j], r, 0, Math.PI * 2);
-                state.canvasItems.push({
+                state.hitItems.push({
                     x: xs[j], y: ys[j], r: r,
-                    id: node.id, index: j,
+                    id: node.id, index: j, layer: "canvas",
                     data: node.data ? extractRow(node.data, j) : null
                 });
             }
@@ -570,31 +570,15 @@ var gridpy = (function () {
     function bindTooltip(state) {
         var tooltip = state.tooltip;
         var container = state.container;
-        var overlay = state.overlay;
 
         container.addEventListener("mousemove", function (event) {
             var rect = container.getBoundingClientRect();
             var mx = event.clientX - rect.left;
             var my = event.clientY - rect.top;
 
-            // The overlay (z-index 3) sits above the SVG layer (z-index 2),
-            // so elementFromPoint always hits the overlay instead of the
-            // data-carrying <circle> elements.  Temporarily hide the overlay
-            // and tooltip to peek through to the SVG layer beneath.
-            if (overlay) overlay.style.pointerEvents = "none";
-            tooltip.style.pointerEvents = "none";
-            var svgEl = document.elementFromPoint(event.clientX, event.clientY);
-            if (overlay) overlay.style.pointerEvents = "";
-            tooltip.style.pointerEvents = "";
-
-            // Check SVG elements first
-            if (svgEl && svgEl.dataset && svgEl.dataset.row) {
-                var rowData = JSON.parse(svgEl.dataset.row);
-                showTooltip(tooltip, rowData, mx, my, container);
-                return;
-            }
-
-            // Check Canvas via quadtree
+            // All interactive items (SVG and Canvas) are registered in a
+            // unified spatial index.  Query by proximity — no DOM hit-testing
+            // needed, so the overlay z-order is irrelevant.
             if (state.quadtree) {
                 var nearest = state.quadtree.find(mx, my, TOOLTIP_SEARCH_RADIUS);
                 if (nearest && nearest.data) {
@@ -656,8 +640,9 @@ var gridpy = (function () {
             ctx.translate(transform.x, transform.y);
             ctx.scale(transform.k, transform.k);
         }
-        // Re-draw all canvas items
-        state.canvasItems.forEach(function (item) {
+        // Re-draw only canvas-layer items (not SVG-registered ones)
+        state.hitItems.forEach(function (item) {
+            if (item.layer !== "canvas") return;
             ctx.beginPath();
             ctx.arc(item.x, item.y, item.r, 0, Math.PI * 2);
             ctx.fill();
@@ -687,7 +672,7 @@ var gridpy = (function () {
 
     function queryRegion(state, x0, y0, x1, y1) {
         var result = [];
-        state.canvasItems.forEach(function (item) {
+        state.hitItems.forEach(function (item) {
             if (item.x >= x0 && item.x <= x1 && item.y >= y0 && item.y <= y1) {
                 result.push(item);
             }
@@ -767,7 +752,7 @@ var gridpy = (function () {
             width: w,
             height: h,
             dpi: sg.dpi || 150,
-            canvasItems: [],
+            hitItems: [],
             quadtree: null,
             sceneGraph: sg
         };
@@ -782,9 +767,9 @@ var gridpy = (function () {
             drawCanvasNode(sg.root, state);
         }
 
-        // Build quadtree for Canvas hit-testing
-        if (state.canvasItems.length > 0) {
-            state.quadtree = buildQuadtree(state.canvasItems);
+        // Build spatial index for tooltip hit-testing (SVG + Canvas items)
+        if (state.hitItems.length > 0) {
+            state.quadtree = buildQuadtree(state.hitItems);
         }
 
         // Bind interactions
@@ -811,7 +796,7 @@ var gridpy = (function () {
         } else {
             var layer = routeToLayer(node);
             if (layer === "svg") {
-                drawSvgGrub(node, parentG);
+                drawSvgGrub(node, parentG, state);
             }
             // Canvas items are drawn in a separate pass
         }
