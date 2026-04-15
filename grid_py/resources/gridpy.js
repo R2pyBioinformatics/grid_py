@@ -570,14 +570,24 @@ var gridpy = (function () {
     function bindTooltip(state) {
         var tooltip = state.tooltip;
         var container = state.container;
+        var overlay = state.overlay;
 
         container.addEventListener("mousemove", function (event) {
             var rect = container.getBoundingClientRect();
             var mx = event.clientX - rect.left;
             var my = event.clientY - rect.top;
 
-            // Check SVG elements first
+            // The overlay (z-index 3) sits above the SVG layer (z-index 2),
+            // so elementFromPoint always hits the overlay instead of the
+            // data-carrying <circle> elements.  Temporarily hide the overlay
+            // and tooltip to peek through to the SVG layer beneath.
+            if (overlay) overlay.style.pointerEvents = "none";
+            tooltip.style.pointerEvents = "none";
             var svgEl = document.elementFromPoint(event.clientX, event.clientY);
+            if (overlay) overlay.style.pointerEvents = "";
+            tooltip.style.pointerEvents = "";
+
+            // Check SVG elements first
             if (svgEl && svgEl.dataset && svgEl.dataset.row) {
                 var rowData = JSON.parse(svgEl.dataset.row);
                 showTooltip(tooltip, rowData, mx, my, container);
