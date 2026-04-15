@@ -442,14 +442,15 @@ class TestIsClosed:
 
 class TestGrobCoordsDispatch:
     def test_grob_coords_plain_grob(self):
-        # Base Grob.grob_coords() returns None (no coordinate implementation)
-        g = Grob(name="test", _grid_class="rect")
+        # Plain Grob (no _grid_class) returns empty coords
+        g = Grob(name="test")
         result = grob_coords(g)
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_coords_glist(self):
-        g1 = Grob(name="a", _grid_class="rect")
-        g2 = Grob(name="b", _grid_class="rect")
+        g1 = Grob(name="a")
+        g2 = Grob(name="b")
         gl = GList(g1, g2)
         result = grob_coords(gl)
         assert isinstance(result, GridGTreeCoords)
@@ -459,16 +460,17 @@ class TestGrobCoordsDispatch:
             grob_coords("not_a_grob")
 
     def test_grob_coords_with_closed(self):
-        g = Grob(name="test", _grid_class="rect")
+        g = Grob(name="test")
         result = grob_coords(g, closed=True)
-        # Base Grob returns None
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_points_plain(self):
-        # Base Grob.grob_points() returns None
-        g = Grob(name="test", _grid_class="rect")
+        # Plain Grob returns empty coords
+        g = Grob(name="test")
         result = grob_points(g)
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_points_glist(self):
         gl = GList(Grob(name="a"))
@@ -483,15 +485,15 @@ class TestGrobCoordsDispatch:
 
     def test_grob_coords_empty_gtree(self):
         tree = GTree(name="tree")
-        # GTree has grob_coords method (from Grob), returns None
         result = grob_coords(tree)
-        assert result is None
+        assert isinstance(result, GridGTreeCoords)
+        assert result.is_empty()
 
     def test_grob_points_empty_gtree(self):
         tree = GTree(name="tree")
-        # GTree has grob_points (from Grob), returns None
         result = grob_points(tree)
-        assert result is None
+        assert isinstance(result, GridGTreeCoords)
+        assert result.is_empty()
 
     def test_grob_points_unknown_type(self):
         # Something that's not Grob/GTree/GList and has no grob_points method
@@ -507,11 +509,8 @@ class TestInternalGrobCoordFunctions:
 
     def test_grob_coords_gtree_with_children(self):
         from grid_py._coords import _grob_coords_gtree
-        child = Grob(name="c", _grid_class="rect")
+        child = Grob(name="c")  # plain grob, no _grid_class
         tree = GTree(children=GList(child), name="tree")
-        # The function expects dict-like children (keyed by name)
-        tree.children = dict(tree._children)
-        tree.children_order = list(tree._children_order)
         result = _grob_coords_gtree(tree, closed=True)
         assert isinstance(result, GridGTreeCoords)
 
@@ -523,23 +522,15 @@ class TestInternalGrobCoordFunctions:
 
     def test_grob_coords_gtree_no_order(self):
         from grid_py._coords import _grob_coords_gtree
-        child = Grob(name="c", _grid_class="rect")
+        child = Grob(name="c")  # plain grob
         tree = GTree(children=GList(child), name="tree")
-        # Use a list (not dict) as children, and no children_order
-        tree.children = [child]
-        # children_order is not set (defaults to attribute from GTree base)
-        # Need to remove it
-        if hasattr(tree, "children_order"):
-            delattr(tree, "children_order")
         result = _grob_coords_gtree(tree, closed=True)
         assert isinstance(result, GridGTreeCoords)
 
     def test_grob_points_gtree_with_children(self):
         from grid_py._coords import _grob_points_gtree
-        child = Grob(name="c", _grid_class="rect")
+        child = Grob(name="c")  # plain grob
         tree = GTree(children=GList(child), name="tree")
-        tree.children = dict(tree._children)
-        tree.children_order = list(tree._children_order)
         result = _grob_points_gtree(tree, closed=True)
         assert isinstance(result, GridGTreeCoords)
 
@@ -551,17 +542,14 @@ class TestInternalGrobCoordFunctions:
 
     def test_grob_points_gtree_no_order(self):
         from grid_py._coords import _grob_points_gtree
-        child = Grob(name="c", _grid_class="rect")
+        child = Grob(name="c")  # plain grob
         tree = GTree(children=GList(child), name="tree")
-        tree.children = [child]
-        if hasattr(tree, "children_order"):
-            delattr(tree, "children_order")
         result = _grob_points_gtree(tree, closed=True)
         assert isinstance(result, GridGTreeCoords)
 
     def test_grob_coords_grob_direct(self):
         from grid_py._coords import _grob_coords_grob
-        g = Grob(name="test", _grid_class="rect")
+        g = Grob(name="test")  # plain grob, no _grid_class
         result = _grob_coords_grob(g, closed=True)
-        # Returns grob_points result, which is None for base Grob
-        assert result is None
+        # Without renderer, returns grob_points which is empty for base Grob
+        assert result.is_empty()

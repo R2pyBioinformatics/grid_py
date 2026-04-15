@@ -609,9 +609,9 @@ class TestWebRendererNewPage:
         r = WebRenderer(width=7, height=5)
         vp = Viewport(name="test", x=0.5, y=0.5, width=0.5, height=0.5)
         r.push_viewport(vp)
-        assert len(r._vp_stack) == 2
+        assert len(r._vp_transform_stack) == 2
         r.new_page()
-        assert len(r._vp_stack) == 1
+        assert len(r._vp_transform_stack) == 1
         assert len(r._node_stack) == 1
 
     def test_new_page_resets_id_generator(self):

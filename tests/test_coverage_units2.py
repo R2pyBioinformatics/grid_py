@@ -458,9 +458,10 @@ class TestModuleFunctions:
         with pytest.raises(TypeError, match="must be a Unit"):
             unit_rep(42, 3)
 
-    def test_unit_rep_negative_raises(self):
-        with pytest.raises(ValueError, match="positive"):
-            unit_rep(Unit(1, "cm"), 0)
+    def test_unit_rep_zero_returns_empty(self):
+        # R: rep(unit(1, "cm"), 0) returns empty unit
+        result = unit_rep(Unit(1, "cm"), 0)
+        assert len(result) == 0
 
     def test_parallel_op_single(self):
         u = Unit([1, 2], "cm")

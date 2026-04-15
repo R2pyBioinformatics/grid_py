@@ -206,7 +206,8 @@ class TestUseGrob:
 
     def test_draw_details(self):
         u = UseGrob(group="g")
-        u.draw_details()  # placeholder
+        with pytest.warns(UserWarning, match="Unknown group"):
+            u.draw_details()
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +253,8 @@ class TestFactoryFunctions:
         assert u.group == "g"
 
     def test_grid_use_draw_true(self):
-        u = grid_use(group="g", draw=True)
+        with pytest.warns(UserWarning, match="Unknown group"):
+            u = grid_use(group="g", draw=True)
         assert isinstance(u, UseGrob)
 
     def test_grid_use_draw_false(self):

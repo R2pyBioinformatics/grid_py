@@ -32,10 +32,12 @@ class TestInitAliases:
         assert grid_py.grid_convert_height is grid_py.convert_height
 
     def test_device_loc(self):
-        assert grid_py.device_loc is grid_py.current_transform
+        # device_loc is now a real function (not a placeholder alias)
+        assert callable(grid_py.device_loc)
 
     def test_device_dim(self):
-        assert grid_py.device_dim is grid_py.current_transform
+        # device_dim is now a real function (not a placeholder alias)
+        assert callable(grid_py.device_dim)
 
     def test_grid_collection(self):
         assert grid_py.grid_collection is grid_py.grid_draw

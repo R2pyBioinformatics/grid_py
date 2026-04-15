@@ -443,49 +443,47 @@ class TestGrobCoordsDispatch:
     """grob_coords and grob_points dispatch on grob type."""
 
     def test_grob_coords_plain_grob(self):
-        """A plain Grob has a grob_coords method that returns None by default."""
+        """A plain Grob returns empty coords (R behavior)."""
         g = Grob(name="plain")
         result = grob_coords(g)
-        # Grob.grob_coords() returns None (no coordinate implementation)
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_coords_null_grob(self):
-        """null_grob has a grob_coords method that returns None by default."""
+        """null_grob returns empty coords (dispatched via _grid_class='null')."""
         ng = null_grob()
         result = grob_coords(ng)
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_coords_gtree(self):
-        """Calling grob_coords on a GTree dispatches through grob_coords method."""
+        """Calling grob_coords on a GTree returns GridGTreeCoords."""
         child = Grob(name="child1")
         tree = GTree(children=GList(child), name="tree1")
         result = grob_coords(tree)
-        # GTree.grob_coords returns None or a GridGTreeCoords
-        # The hasattr path is taken, returning whatever the method produces
-        assert result is None or isinstance(result, GridGTreeCoords)
+        assert isinstance(result, GridGTreeCoords)
 
     def test_grob_coords_glist(self):
         """Calling grob_coords on a GList returns GridGTreeCoords."""
         g1 = Grob(name="g1")
         g2 = Grob(name="g2")
         gl = GList(g1, g2)
-        # GList does not have grob_coords method, so the isinstance branch fires
         result = grob_coords(gl)
         assert isinstance(result, GridGTreeCoords)
 
     def test_grob_points_plain_grob(self):
-        """grob_points on a plain Grob: method returns None by default."""
+        """grob_points on a plain Grob returns empty coords."""
         g = Grob(name="plain")
         result = grob_points(g)
-        # Grob.grob_points() returns None
-        assert result is None
+        assert isinstance(result, GridGrobCoords)
+        assert result.is_empty()
 
     def test_grob_points_gtree_via_method(self):
-        """grob_points on a GTree dispatches through grob_points method."""
+        """grob_points on a GTree returns GridGTreeCoords."""
         child = Grob(name="child")
         tree = GTree(children=GList(child), name="tree")
         result = grob_points(tree)
-        assert result is None or isinstance(result, GridGTreeCoords)
+        assert isinstance(result, GridGTreeCoords)
 
     def test_grob_coords_unsupported_type(self):
         with pytest.raises(TypeError, match="does not support"):

@@ -248,21 +248,25 @@ class TestViewportResolution:
     def test_viewport_absolute_width(self, renderer_3x2):
         vp = Viewport(width=Unit(1.0, "inches"), height=Unit(1.0, "inches"))
         renderer_3x2.push_viewport(vp)
-        # Child viewport should be 100px wide (1 inch at 100 DPI)
-        x0, y0, pw, ph, vp_obj = renderer_3x2._vp_stack[-1]
+        # Use new transform stack: width_cm / 2.54 * dpi = device px
+        vtr = renderer_3x2._vp_transform_stack[-1]
+        pw = vtr.width_cm / 2.54 * 100  # 100 DPI
         assert pw == pytest.approx(100.0, abs=1.0)
 
     def test_viewport_cm_width(self, renderer_3x2):
         vp = Viewport(width=Unit(2.54, "cm"), height=Unit(2.54, "cm"))
         renderer_3x2.push_viewport(vp)
-        x0, y0, pw, ph, vp_obj = renderer_3x2._vp_stack[-1]
+        vtr = renderer_3x2._vp_transform_stack[-1]
+        pw = vtr.width_cm / 2.54 * 100
         # 2.54 cm = 1 inch = 100 px at 100 DPI
         assert pw == pytest.approx(100.0, abs=1.0)
 
     def test_viewport_npc_unchanged(self, renderer_3x2):
         vp = Viewport(width=Unit(0.5, "npc"), height=Unit(0.5, "npc"))
         renderer_3x2.push_viewport(vp)
-        x0, y0, pw, ph, vp_obj = renderer_3x2._vp_stack[-1]
+        vtr = renderer_3x2._vp_transform_stack[-1]
+        pw = vtr.width_cm / 2.54 * 100
+        ph = vtr.height_cm / 2.54 * 100
         # 0.5 * 300px = 150px
         assert pw == pytest.approx(150.0, abs=1.0)
         # 0.5 * 200px = 100px

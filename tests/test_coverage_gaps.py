@@ -206,10 +206,10 @@ class TestRendererSurfaceTypes:
         """Vector surfaces should use pt-based viewport stack."""
         pdf_path = str(tmp_path / "vp_test.pdf")
         r = CairoRenderer(width=5, height=4, surface_type="pdf", filename=pdf_path)
-        # Initial viewport stack for vector surfaces is in pt
-        x0, y0, w, h, *_ = r._vp_stack[-1]
-        assert w == pytest.approx(5 * 72.0)
-        assert h == pytest.approx(4 * 72.0)
+        # Check viewport via transform stack
+        vtr = r._vp_transform_stack[-1]
+        assert vtr.width_cm == pytest.approx(5 * 2.54, abs=0.01)
+        assert vtr.height_cm == pytest.approx(4 * 2.54, abs=0.01)
         r.finish()
 
 
@@ -1754,9 +1754,9 @@ class TestRendererViewportManagement:
             width=Unit(0.5, "npc"), height=Unit(0.5, "npc"),
         )
         r.push_viewport(vp)
-        assert len(r._vp_stack) == 2
+        assert len(r._vp_transform_stack) == 2
         r.pop_viewport()
-        assert len(r._vp_stack) == 1
+        assert len(r._vp_transform_stack) == 1
 
     def test_push_viewport_with_clip(self):
         r = CairoRenderer(width=5, height=4)
@@ -1772,7 +1772,7 @@ class TestRendererViewportManagement:
         """Popping at root level should be a no-op."""
         r = CairoRenderer(width=5, height=4)
         r.pop_viewport()  # Should not crash
-        assert len(r._vp_stack) == 1
+        assert len(r._vp_transform_stack) == 1
 
 
 # =========================================================================

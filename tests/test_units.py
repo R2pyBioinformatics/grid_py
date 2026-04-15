@@ -405,9 +405,10 @@ class TestUnitRep:
         assert len(r) == 6
         assert r.units_list == ["cm", "inches", "cm", "inches", "cm", "inches"]
 
-    def test_rep_zero_raises(self):
-        with pytest.raises(ValueError):
-            unit_rep(Unit(1, "cm"), 0)
+    def test_rep_zero_returns_empty(self):
+        # R: rep(unit(1, "cm"), 0) returns empty unit
+        result = unit_rep(Unit(1, "cm"), 0)
+        assert len(result) == 0
 
 
 # ===================================================================

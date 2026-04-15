@@ -153,9 +153,11 @@ class TestGridLocator:
         assert abs(result["y"] - 25.0) < 1.0
 
     def test_none_returns_none(self):
+        import pytest
         from grid_py import grid_newpage, grid_locator
         grid_newpage(width=3, height=3, dpi=100)
-        assert grid_locator("npc") is None
+        with pytest.warns(UserWarning, match="not supported in non-interactive"):
+            assert grid_locator("npc") is None
 
     def test_cm_conversion(self):
         from grid_py import grid_newpage, grid_locator

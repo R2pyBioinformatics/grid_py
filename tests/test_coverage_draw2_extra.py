@@ -340,7 +340,11 @@ class TestRenderDispatch:
         def __init__(self):
             self.calls = []
             self.dpi = 100.0
-            self._vp_stack = [(0.0, 0.0, 300.0, 200.0, None)]
+            # Provide both old compat and new transform stack
+            from grid_py._vp_calc import calc_root_transform
+            self._vp_transform_stack = [calc_root_transform(
+                3.0 * 2.54, 2.0 * 2.54)]
+            self._vp_obj_stack = [None]
 
         def __getattr__(self, name):
             # Resolve methods must return proper values

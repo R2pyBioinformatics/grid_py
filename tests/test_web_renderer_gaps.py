@@ -490,7 +490,8 @@ class TestGridCapFallback:
         state = get_state()
         state.init_device(r)
         grid_draw(rect_grob(x=0.5, y=0.5, width=0.5, height=0.5))
-        result = grid_cap()
+        with pytest.warns(UserWarning, match="failed to capture raster"):
+            result = grid_cap()
         assert result is None
 
 
