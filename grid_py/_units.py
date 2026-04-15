@@ -53,6 +53,12 @@ __all__ = [
     "convert_y",
     "convert_width",
     "convert_height",
+    "device_loc",
+    "device_dim",
+    "convert_theta",
+    "unit_summary_min",
+    "unit_summary_max",
+    "unit_summary_sum",
 ]
 
 # ---------------------------------------------------------------------------
@@ -233,38 +239,90 @@ def _try_resolve_with_renderer(
     axis: str,
     type_: str,
 ) -> Optional[float]:
-    """Try to resolve a context-dependent unit via the active renderer.
+    """Resolve a context-dependent unit via the active renderer.
+
+    Implements R's ``L_convert`` two-stage pipeline (grid.c:1384-1575):
+      Stage 1: any unit → inches  (via renderer._resolve_to_inches_idx)
+      Stage 2: inches → target    (via _vp_calc inverse transforms)
 
     Returns the converted value in *target* units, or ``None`` if no
     renderer is available.
     """
     from ._state import get_state
+    from ._vp_calc import (
+        _transform_xy_from_inches,
+        _transform_wh_from_inches,
+        _transform_xy_to_npc,
+        _transform_wh_to_npc,
+        _transform_xy_from_npc,
+        _transform_wh_from_npc,
+    )
+
     state = get_state()
     renderer = state.get_renderer()
 
-    if renderer is None or not hasattr(renderer, "resolve_to_npc"):
+    if renderer is None or not hasattr(renderer, "_resolve_to_inches_idx"):
         return None
 
     # Build a single-element Unit for the source
     elem = Unit(x._values[i], src_unit, data=x._data[i])
     is_dim = type_ in ("dimension",)
 
-    # Resolve source -> NPC
-    npc_val = renderer.resolve_to_npc(elem, axis=axis, is_dim=is_dim)
+    # Get viewport context from renderer
+    vtr = renderer._vp_transform_stack[-1]
+    vpc = vtr.vpc
 
-    # Convert NPC -> target
-    if target == "npc":
-        return npc_val
-    elif target in _ABSOLUTE_UNIT_TYPES:
-        # NPC -> inches -> target
-        _x0, _y0, vp_pw, vp_ph = renderer.get_viewport_bounds()
-        vp_px = vp_pw if axis == "x" else vp_ph
-        vp_inches = vp_px / renderer.dpi
-        inches = npc_val * vp_inches
-        return inches / _INCHES_PER[target]
+    # Determine axis parameters (R grid.c:1426-1427)
+    #   axis encoding: 0=x-loc, 1=y-loc, 2=x-dim, 3=y-dim
+    if axis == "x":
+        scalemin, scalemax = vpc.xscalemin, vpc.xscalemax
+        this_cm = vtr.width_cm
+        other_cm = vtr.height_cm
     else:
-        # Target is also context-dependent -- just return the NPC value
-        return npc_val
+        scalemin, scalemax = vpc.yscalemin, vpc.yscalemax
+        this_cm = vtr.height_cm
+        other_cm = vtr.width_cm
+
+    # R grid.c:1438-1444 -- special case: relative-to-relative with zero dim
+    from_is_relative = src_unit in ("native", "npc")
+    to_is_relative = target in ("native", "npc")
+    rel_convert = (from_is_relative and to_is_relative
+                   and this_cm < 1e-6)
+
+    # Stage 1: convert source → inches (or NPC for relConvert)
+    if rel_convert:
+        if is_dim:
+            stage1 = _transform_wh_to_npc(
+                float(x._values[i]), src_unit, scalemin, scalemax)
+        else:
+            stage1 = _transform_xy_to_npc(
+                float(x._values[i]), src_unit, scalemin, scalemax)
+    else:
+        # Use renderer's full pipeline to get inches
+        gp = state.get_gpar()
+        stage1 = renderer._resolve_to_inches_idx(elem, 0, axis, is_dim, gp)
+
+    # Stage 2: inches (or NPC) → target unit
+    if rel_convert:
+        if is_dim:
+            return _transform_wh_from_npc(stage1, target, scalemin, scalemax)
+        else:
+            return _transform_xy_from_npc(stage1, target, scalemin, scalemax)
+    else:
+        fontsize, cex, lineheight = renderer._gpar_font_params(state.get_gpar())
+        scale = renderer._get_scale()
+        if is_dim:
+            return _transform_wh_from_inches(
+                stage1, target, scalemin, scalemax,
+                fontsize, cex, lineheight,
+                this_cm, other_cm, scale,
+            )
+        else:
+            return _transform_xy_from_inches(
+                stage1, target, scalemin, scalemax,
+                fontsize, cex, lineheight,
+                this_cm, other_cm, scale,
+            )
 
 
 def _resolve_alias(unit_str: str) -> str:
@@ -778,18 +836,27 @@ def is_unit(x: Any) -> bool:
     return isinstance(x, Unit)
 
 
-def unit_type(x: Unit) -> Union[str, List[str]]:
+def unit_type(x: Unit, recurse: bool = False) -> Union[str, List[str], List[Any]]:
     """Return the unit type(s) of *x*.
+
+    Port of R ``unitType()`` (unit.R:197-226).
 
     Parameters
     ----------
     x : Unit
         A unit object.
+    recurse : bool
+        If ``True``, compound units (sum/min/max) are recursively
+        expanded to reveal the underlying unit types.  Returns a list
+        of lists for compound elements.  Default ``False``.
 
     Returns
     -------
-    str or list of str
-        A single string when *x* has length 1, otherwise a list.
+    str or list
+        When *recurse* is ``False``: a single string (length 1) or
+        list of strings.
+        When *recurse* is ``True``: a list where compound elements
+        are themselves lists of their constituent unit types.
 
     Raises
     ------
@@ -805,9 +872,26 @@ def unit_type(x: Unit) -> Union[str, List[str]]:
     """
     if not isinstance(x, Unit):
         raise TypeError("x must be a Unit")
-    if len(x) == 1:
-        return x._units[0]
-    return list(x._units)
+
+    if not recurse:
+        if len(x) == 1:
+            return x._units[0]
+        return list(x._units)
+
+    # recurse=True: expand compound units (R unit.R:211-224)
+    result = []
+    for i in range(len(x)):
+        utype = x._units[i]
+        if utype in ("sum", "min", "max"):
+            # Compound unit: recurse into the child Unit stored in _data
+            child = x._data[i]
+            if isinstance(child, Unit):
+                result.append(unit_type(child, recurse=True))
+            else:
+                result.append(utype)
+        else:
+            result.append(utype)
+    return result
 
 
 def unit_c(*args: Unit) -> Unit:
@@ -968,15 +1052,27 @@ def _parallel_op(op: str, *args: Unit) -> Unit:
     return result
 
 
-def unit_rep(x: Unit, times: int = 1) -> Unit:
-    """Repeat a ``Unit`` *times* times.
+def unit_rep(
+    x: Unit,
+    times: int = 1,
+    length_out: Optional[int] = None,
+    each: int = 1,
+) -> Unit:
+    """Repeat a ``Unit`` object.
+
+    Port of R ``rep.unit()`` (unit.R:539-542).  Mirrors the semantics
+    of R's ``rep(x, times, length.out, each)``.
 
     Parameters
     ----------
     x : Unit
         The unit to repeat.
     times : int
-        Number of repetitions.
+        Number of times to repeat the (possibly each-expanded) unit.
+    length_out : int or None
+        If given, truncate or recycle the result to this length.
+    each : int
+        Replicate each element *each* times before tiling.
 
     Returns
     -------
@@ -987,13 +1083,168 @@ def unit_rep(x: Unit, times: int = 1) -> Unit:
     --------
     >>> unit_rep(Unit(1, "cm"), 3)
     Unit([1.0, 1.0, 1.0], ['cm', 'cm', 'cm'])
+    >>> unit_rep(Unit([1, 2], "cm"), each=2)
+    Unit([1.0, 1.0, 2.0, 2.0], ['cm', 'cm', 'cm', 'cm'])
+    >>> unit_rep(Unit([1, 2, 3], "cm"), length_out=5)
+    Unit([1.0, 2.0, 3.0, 1.0, 2.0], ['cm', 'cm', 'cm', 'cm', 'cm'])
     """
     if not isinstance(x, Unit):
         raise TypeError("x must be a Unit")
-    if times <= 0:
-        raise ValueError("times must be a positive integer")
-    indices = list(range(len(x))) * times
-    return x[indices]
+
+    # Build index vector mirroring R's rep(seq_along(x), times, length.out, each)
+    n = len(x)
+    base = list(range(n))
+
+    # Apply each: replicate each element
+    if each > 1:
+        base = [i for i in base for _ in range(each)]
+
+    # Apply times: tile the whole sequence (times=0 → empty)
+    if times == 0:
+        base = []
+    elif times > 1:
+        base = base * times
+
+    # Apply length_out: truncate or recycle
+    if length_out is not None:
+        if length_out <= 0:
+            base = []
+        elif len(base) == 0:
+            # Recycle from original if times made it empty
+            base = list(range(n))
+            full_cycles = length_out // len(base)
+            remainder = length_out % len(base)
+            base = base * full_cycles + base[:remainder]
+        else:
+            full_cycles = length_out // len(base)
+            remainder = length_out % len(base)
+            base = base * full_cycles + base[:remainder]
+
+    if len(base) == 0:
+        # Return empty Unit
+        new = Unit.__new__(Unit)
+        new._values = np.array([], dtype=np.float64)
+        new._units = []
+        new._data = []
+        new._is_absolute = False
+        return new
+
+    return x[base]
+
+
+# ===================================================================
+# Summary.unit: min / max / sum  (port of R unit.R:300-347)
+# ===================================================================
+
+
+def unit_summary_min(*args: Unit) -> Unit:
+    """Return the minimum across all elements of all input units.
+
+    Port of R ``Summary.unit`` for ``min`` (unit.R:300-347).
+    Unlike :func:`unit_pmin` (element-wise), this returns a single
+    scalar unit representing the global minimum.
+
+    Parameters
+    ----------
+    *args : Unit
+        One or more unit objects.
+
+    Returns
+    -------
+    Unit
+        A single-element unit with the minimum value.
+
+    Examples
+    --------
+    >>> unit_summary_min(Unit([3, 1, 4], "cm"))
+    Unit([1.0], ['cm'])
+    """
+    return _summary_op("min", *args)
+
+
+def unit_summary_max(*args: Unit) -> Unit:
+    """Return the maximum across all elements of all input units.
+
+    Port of R ``Summary.unit`` for ``max`` (unit.R:300-347).
+
+    Parameters
+    ----------
+    *args : Unit
+        One or more unit objects.
+
+    Returns
+    -------
+    Unit
+        A single-element unit with the maximum value.
+
+    Examples
+    --------
+    >>> unit_summary_max(Unit([3, 1, 4], "cm"))
+    Unit([4.0], ['cm'])
+    """
+    return _summary_op("max", *args)
+
+
+def unit_summary_sum(*args: Unit) -> Unit:
+    """Return the sum of all elements of all input units.
+
+    Port of R ``Summary.unit`` for ``sum`` (unit.R:300-347).
+
+    Parameters
+    ----------
+    *args : Unit
+        One or more unit objects.
+
+    Returns
+    -------
+    Unit
+        A single-element unit with the total sum.
+
+    Examples
+    --------
+    >>> unit_summary_sum(Unit([1, 2, 3], "cm"))
+    Unit([6.0], ['cm'])
+    """
+    return _summary_op("sum", *args)
+
+
+def _summary_op(op: str, *args: Unit) -> Unit:
+    """Internal implementation for Summary.unit (min/max/sum).
+
+    Port of R ``Summary.unit`` (unit.R:300-347).
+
+    Optimisation: if all elements across all inputs share the same
+    simple unit type, the operation is applied directly on the numeric
+    values.  Otherwise, a compound unit is created.
+    """
+    if len(args) == 0:
+        raise ValueError(f"unit {op} requires at least one argument")
+
+    # Filter out None args (R: units[!vapply(units, is.null, ...)])
+    units = [a for a in args if a is not None and isinstance(a, Unit)]
+    if len(units) == 0:
+        raise ValueError(f"unit {op} requires at least one Unit argument")
+
+    # Concatenate all elements
+    combined = unit_c(*units)
+
+    # Optimisation: identical simple unit types (R unit.R:308-320)
+    all_types = set(combined._units)
+    if len(all_types) == 1 and list(all_types)[0] not in ("sum", "min", "max"):
+        utype = combined._units[0]
+        vals = combined._values
+        if op == "sum":
+            result_val = float(np.sum(vals))
+        elif op == "min":
+            result_val = float(np.min(vals))
+        else:  # max
+            result_val = float(np.max(vals))
+        return Unit(result_val, utype)
+
+    # General case: create compound unit (R unit.R:321-347)
+    # The compound wraps all elements under a single min/max/sum operation
+    op_code = {"sum": "sum", "min": "min", "max": "max"}[op]
+    return Unit(1.0, op_code, data=combined)
 
 
 # ===================================================================
@@ -1217,48 +1468,56 @@ def convert_unit(
     for i in range(n):
         src_unit = x._units[i]
         if src_unit in _ABSOLUTE_UNIT_TYPES and target in _ABSOLUTE_UNIT_TYPES:
+            # Fast path: absolute → absolute (no context needed)
             result_vals[i] = _convert_absolute(x._values[i], src_unit, target)
         elif src_unit == target:
             # Same unit type -- no conversion needed
             result_vals[i] = x._values[i]
-        elif src_unit in _STR_METRIC_TYPES:
-            # Evaluate string metric → inches, then convert to target
-            inches_val = _eval_str_metric(src_unit, x._data[i], x._values[i])
-            if target in _ABSOLUTE_UNIT_TYPES:
-                result_vals[i] = inches_val / _INCHES_PER[target]
-            else:
-                result_vals[i] = inches_val
-                converted = False
-        elif src_unit in _GROB_METRIC_TYPES:
-            # Evaluate grob metric → Unit, extract inches, convert
-            metric_unit = _eval_grob_metric(src_unit, x._data[i])
-            if (
-                metric_unit is not None
-                and len(metric_unit) > 0
-                and metric_unit._units[0] in _ABSOLUTE_UNIT_TYPES
-            ):
-                # Convert the measured value to inches first
-                src_inches = (
-                    metric_unit._values[0]
-                    * _INCHES_PER[metric_unit._units[0]]
-                )
-                # Apply the scale factor from the original unit
-                src_inches *= x._values[i]
-                if target in _ABSOLUTE_UNIT_TYPES:
-                    result_vals[i] = src_inches / _INCHES_PER[target]
-                else:
-                    result_vals[i] = src_inches
-                    converted = False
-            else:
-                result_vals[i] = x._values[i]
-                converted = False
         else:
-            # Context-dependent: try to resolve via active renderer
+            # All other conversions go through the full two-stage pipeline
+            # (R grid.c:1384-1575 L_convert):
+            #   Stage 1: source → inches (via renderer context)
+            #   Stage 2: inches → target (via inverse transforms)
+            # This handles: npc, native, lines, char, snpc, strwidth,
+            # grobwidth, compound units, absolute→context, context→absolute
             resolved = _try_resolve_with_renderer(
                 x, i, src_unit, target, axisFrom, typeFrom,
             )
             if resolved is not None:
                 result_vals[i] = resolved
+            elif src_unit in _STR_METRIC_TYPES:
+                # Fallback without renderer: string metric → inches → target
+                inches_val = _eval_str_metric(src_unit, x._data[i], x._values[i])
+                if target in _ABSOLUTE_UNIT_TYPES:
+                    result_vals[i] = inches_val / _INCHES_PER[target]
+                else:
+                    result_vals[i] = inches_val
+                    converted = False
+            elif src_unit in _GROB_METRIC_TYPES:
+                # Fallback: grob metric → inches → target
+                metric_unit = _eval_grob_metric(src_unit, x._data[i])
+                if (
+                    metric_unit is not None
+                    and len(metric_unit) > 0
+                    and metric_unit._units[0] in _ABSOLUTE_UNIT_TYPES
+                ):
+                    src_inches = (
+                        metric_unit._values[0]
+                        * _INCHES_PER[metric_unit._units[0]]
+                    )
+                    src_inches *= x._values[i]
+                    if target in _ABSOLUTE_UNIT_TYPES:
+                        result_vals[i] = src_inches / _INCHES_PER[target]
+                    else:
+                        result_vals[i] = src_inches
+                        converted = False
+                else:
+                    result_vals[i] = x._values[i]
+                    converted = False
+            elif src_unit in _ABSOLUTE_UNIT_TYPES:
+                # Absolute source → context-dependent target (no renderer)
+                result_vals[i] = x._values[i]
+                converted = False
             else:
                 result_vals[i] = x._values[i]
                 converted = False
@@ -1358,3 +1617,219 @@ def convert_height(x: Unit, unitTo: str, valueOnly: bool = False) -> Union[Unit,
     return convert_unit(
         x, unitTo, "y", "dimension", "y", "dimension", valueOnly=valueOnly
     )
+
+
+# ---------------------------------------------------------------------------
+# convertTheta -- port of R unit.R:617-629
+# ---------------------------------------------------------------------------
+
+
+_THETA_ALIASES: Dict[str, float] = {
+    "east": 0.0,
+    "north": 90.0,
+    "west": 180.0,
+    "south": 270.0,
+}
+
+
+def convert_theta(theta: Any) -> float:
+    """Convert a theta angle to numeric degrees in [0, 360).
+
+    Port of R ``convertTheta()`` (unit.R:617-629).
+    Accepts character shortcuts ``"east"`` (0), ``"north"`` (90),
+    ``"west"`` (180), ``"south"`` (270) or numeric values.
+
+    Parameters
+    ----------
+    theta : str or float
+        Angle specification.
+
+    Returns
+    -------
+    float
+        Angle in degrees, normalised to [0, 360).
+
+    Raises
+    ------
+    ValueError
+        If *theta* is an unrecognised string.
+
+    Examples
+    --------
+    >>> convert_theta("north")
+    90.0
+    >>> convert_theta(450)
+    90.0
+    """
+    if isinstance(theta, str):
+        val = _THETA_ALIASES.get(theta.lower())
+        if val is None:
+            raise ValueError(f"invalid theta: {theta!r}")
+        return val
+    return float(theta) % 360.0
+
+
+# ---------------------------------------------------------------------------
+# deviceLoc / deviceDim -- port of R unit.R:117-151 + grid.c:1580-1677
+# ---------------------------------------------------------------------------
+
+
+def device_loc(
+    x: Unit,
+    y: Unit,
+    value_only: bool = False,
+    device: bool = False,
+) -> dict:
+    """Convert grid locations to absolute device coordinates.
+
+    Port of R ``deviceLoc()`` (unit.R:117-133) + ``L_devLoc`` (grid.c:1580-1628).
+    For each (x[i], y[i]) pair:
+      1. Convert x to inches via transformXtoINCHES
+      2. Convert y to inches via transformYtoINCHES
+      3. Apply the viewport 3×3 transform (transformLocn: location → trans)
+      4. Optionally convert to device coordinates
+
+    Parameters
+    ----------
+    x, y : Unit
+        Location units.
+    value_only : bool
+        If True, return raw numeric arrays. Otherwise return Unit objects.
+    device : bool
+        If True, return in device-native coordinates (pixels).
+        If False, return in absolute inches.
+
+    Returns
+    -------
+    dict
+        ``{'x': ..., 'y': ...}`` — each is either a Unit or ndarray.
+    """
+    from ._state import get_state
+    from ._vp_calc import location, trans
+
+    state = get_state()
+    renderer = state.get_renderer()
+
+    if renderer is None:
+        raise RuntimeError("deviceLoc requires an active renderer")
+
+    vtr = renderer._vp_transform_stack[-1]
+    gp = state.get_gpar()
+
+    nx = len(x)
+    ny = len(y)
+    maxn = max(nx, ny)
+
+    out_x = np.empty(maxn, dtype=np.float64)
+    out_y = np.empty(maxn, dtype=np.float64)
+
+    for i in range(maxn):
+        # Stage 1: resolve to inches within viewport
+        # R grid.c:1612-1616  transformLocn()
+        xx = renderer._resolve_to_inches_idx(x, i % nx, "x", False, gp)
+        yy = renderer._resolve_to_inches_idx(y, i % ny, "y", False, gp)
+
+        # Stage 2: apply viewport 3×3 transform to get absolute inches
+        # R unit.c:1168-1171  location→trans
+        loc = location(xx, yy)
+        abs_loc = trans(loc, vtr.transform)
+        xx = abs_loc[0]
+        yy = abs_loc[1]
+
+        if device:
+            # Convert absolute inches to device pixels
+            # R grid.c:1618-1619  toDeviceX/Y
+            xx = renderer.inches_to_dev_x(xx)
+            yy = renderer.inches_to_dev_y(yy)
+
+        out_x[i] = xx
+        out_y[i] = yy
+
+    if value_only:
+        return {"x": out_x, "y": out_y}
+    else:
+        if device:
+            return {"x": Unit(out_x, "native"), "y": Unit(out_y, "native")}
+        else:
+            return {"x": Unit(out_x, "inches"), "y": Unit(out_y, "inches")}
+
+
+def device_dim(
+    w: Unit,
+    h: Unit,
+    value_only: bool = False,
+    device: bool = False,
+) -> dict:
+    """Convert grid dimensions to absolute device dimensions.
+
+    Port of R ``deviceDim()`` (unit.R:135-151) + ``L_devDim`` (grid.c:1630-1677).
+    For each (w[i], h[i]) pair:
+      1. Convert w to inches via transformWidthtoINCHES
+      2. Convert h to inches via transformHeighttoINCHES
+      3. Apply rotation transform (transformDimn)
+      4. Optionally convert to device units
+
+    Parameters
+    ----------
+    w, h : Unit
+        Dimension units.
+    value_only : bool
+        If True, return raw numeric arrays. Otherwise return Unit objects.
+    device : bool
+        If True, return in device-native units (pixels).
+        If False, return in absolute inches.
+
+    Returns
+    -------
+    dict
+        ``{'w': ..., 'h': ...}`` — each is either a Unit or ndarray.
+    """
+    import math
+    from ._state import get_state
+    from ._vp_calc import location, rotation, trans
+
+    state = get_state()
+    renderer = state.get_renderer()
+
+    if renderer is None:
+        raise RuntimeError("deviceDim requires an active renderer")
+
+    vtr = renderer._vp_transform_stack[-1]
+    gp = state.get_gpar()
+    rotation_angle = vtr.rotation_angle
+
+    nw = len(w)
+    nh = len(h)
+    maxn = max(nw, nh)
+
+    out_w = np.empty(maxn, dtype=np.float64)
+    out_h = np.empty(maxn, dtype=np.float64)
+
+    for i in range(maxn):
+        # Stage 1: resolve to inches within viewport
+        ww = renderer._resolve_to_inches_idx(w, i % nw, "x", True, gp)
+        hh = renderer._resolve_to_inches_idx(h, i % nh, "y", True, gp)
+
+        # Stage 2: apply rotation (R unit.c:1208-1212 transformDimn)
+        # R: location(ww,hh,din); rotation(angle,r); trans(din,r,dout);
+        din = location(ww, hh)
+        rot = rotation(rotation_angle)
+        dout = trans(din, rot)
+        ww = dout[0]
+        hh = dout[1]
+
+        if device:
+            # Convert absolute inches to device pixels
+            ww = renderer.inches_to_dev_w(ww)
+            hh = renderer.inches_to_dev_h(hh)
+
+        out_w[i] = ww
+        out_h[i] = hh
+
+    if value_only:
+        return {"w": out_w, "h": out_h}
+    else:
+        if device:
+            return {"w": Unit(out_w, "native"), "h": Unit(out_h, "native")}
+        else:
+            return {"w": Unit(out_w, "inches"), "h": Unit(out_h, "inches")}

@@ -33,6 +33,14 @@ __all__ = [
     "copy_transform",
     # Viewport transform (port of viewport.c:calcViewportTransform)
     "calc_viewport_transform",
+    # Inverse transforms (port of unit.c:1226-1475)
+    "_transform_from_inches",
+    "_transform_xy_from_inches",
+    "_transform_wh_from_inches",
+    "_transform_xy_to_npc",
+    "_transform_wh_to_npc",
+    "_transform_xy_from_npc",
+    "_transform_wh_from_npc",
     # Viewport context
     "ViewportContext",
     "ViewportTransformResult",
@@ -486,17 +494,19 @@ def _transform_to_inches(
             return value * effective * 0.25 / 72.0
 
     # ---- Grob metrics (unit.c:770-800) ----
+    # R's evaluateGrobUnit (unit.c:325-590) does a full preDraw/postDraw
+    # cycle on the grob, then calls widthDetails/heightDetails to get a
+    # result Unit, converts it to inches *within the grob's viewport
+    # context*, and returns the inches value.
+    #
+    # grob_metric_fn(grob, utype, value) must return **inches** directly
+    # (it does the full preDraw/eval/postDraw/restore cycle internally).
     if utype in ("grobwidth", "grobheight", "grobascent", "grobdescent",
                   "grobx", "groby"):
         if grob_metric_fn is not None and data is not None:
-            metric_unit = grob_metric_fn(data, utype)
-            if metric_unit is not None and hasattr(metric_unit, "_values"):
-                return value * _transform_to_inches(
-                    metric_unit, 0, vpc,
-                    gc_fontsize, gc_cex, gc_lineheight,
-                    this_cm, other_cm, axis, True,
-                    str_metric_fn, grob_metric_fn,
-                )
+            inches = grob_metric_fn(data, utype, value)
+            if inches is not None:
+                return value * inches
         return 0.0
 
     # ---- Compound units: sum, min, max ----
@@ -540,6 +550,228 @@ def _transform_to_inches(
 
     # ---- Fallback: treat as NPC ----
     return value * this_inches
+
+
+# ============================================================================
+# Inverse transform: inches → target unit  (port of unit.c:1226-1475)
+# ============================================================================
+
+
+def _transform_from_inches(
+    value: float,
+    unit: str,
+    gc_fontsize: float,
+    gc_cex: float,
+    gc_lineheight: float,
+    this_cm: float,
+    other_cm: float,
+    scale: float = 1.0,
+) -> float:
+    """Convert a value in inches to the given unit type.
+
+    Port of R ``unit.c:1226-1333 transformFromINCHES()``.
+    Handles absolute and font-relative units.  For physical units,
+    applies the inverse of GSS_SCALE (unit.c:1313-1331).
+
+    Parameters
+    ----------
+    value : float
+        Value in inches.
+    unit : str
+        Target unit type string.
+    gc_fontsize, gc_cex, gc_lineheight : float
+        Font context parameters.
+    this_cm, other_cm : float
+        Viewport dimensions in CM for primary and orthogonal axis.
+    scale : float
+        GSS_SCALE zoom factor.
+
+    Returns
+    -------
+    float
+        The value in the target unit.
+    """
+    result = value
+
+    if unit == "npc":
+        # unit.c:1237  result/(thisCM/2.54)
+        this_inches = this_cm / 2.54
+        if this_inches < 1e-10:
+            if result != 0:
+                raise ValueError("Viewport has zero dimension(s)")
+            return 0.0
+        result = result / this_inches
+    elif unit == "inches":
+        pass  # unit.c:1243
+    elif unit == "cm":
+        result = result * 2.54  # unit.c:1240
+    elif unit == "mm":
+        result = result * 25.4  # unit.c:1270
+    elif unit == "points":
+        result = result * 72.27  # unit.c:1275
+    elif unit == "picas":
+        result = result / 12.0 * 72.27  # unit.c:1278
+    elif unit == "bigpts":
+        result = result * 72.0  # unit.c:1281
+    elif unit == "dida":
+        result = result / 1238.0 * 1157.0 * 72.27  # unit.c:1284
+    elif unit == "cicero":
+        result = result / 1238.0 * 1157.0 * 72.27 / 12.0  # unit.c:1287
+    elif unit == "scaledpts":
+        result = result * 65536.0 * 72.27  # unit.c:1290
+    elif unit == "char":
+        # unit.c:1253  (result*72)/(gc->ps*gc->cex)
+        ps_cex = gc_fontsize * gc_cex
+        if ps_cex < 1e-10:
+            return 0.0
+        result = (result * 72.0) / ps_cex
+    elif unit == "lines":
+        # unit.c:1256  (result*72)/(gc->ps*gc->cex*gc->lineheight)
+        ps_cex_lh = gc_fontsize * gc_cex * gc_lineheight
+        if ps_cex_lh < 1e-10:
+            return 0.0
+        result = (result * 72.0) / ps_cex_lh
+    elif unit == "snpc":
+        # unit.c:1258-1268
+        if this_cm < 1e-6 or other_cm < 1e-6:
+            if result != 0:
+                raise ValueError("Viewport has zero dimension(s)")
+            return 0.0
+        min_inches = min(this_cm, other_cm) / 2.54
+        result = result / min_inches
+    else:
+        raise ValueError(f"Cannot convert from inches to unit {unit!r}")
+
+    # For physical units, reverse the GSS_SCALE (unit.c:1313-1331)
+    _PHYSICAL_UNITS = {
+        "inches", "cm", "mm", "points", "picas",
+        "bigpts", "dida", "cicero", "scaledpts",
+    }
+    if unit in _PHYSICAL_UNITS and scale != 0:
+        result = result / scale
+
+    return result
+
+
+def _transform_xy_from_inches(
+    location_inches: float,
+    unit: str,
+    scalemin: float,
+    scalemax: float,
+    gc_fontsize: float,
+    gc_cex: float,
+    gc_lineheight: float,
+    this_cm: float,
+    other_cm: float,
+    scale: float = 1.0,
+) -> float:
+    """Convert a location in inches to the target unit.
+
+    Port of R ``unit.c:1348-1377 transformXYFromINCHES()``.
+    Handles the special NATIVE case (scale mapping).
+    """
+    if unit == "native":
+        this_inches = this_cm / 2.54
+        if this_inches < 1e-10:
+            if location_inches != 0:
+                raise ValueError("Viewport has zero dimension(s)")
+            return 0.0
+        # unit.c:1369  scalemin + (result/(thisCM/2.54))*(scalemax - scalemin)
+        return scalemin + (location_inches / this_inches) * (scalemax - scalemin)
+    return _transform_from_inches(
+        location_inches, unit,
+        gc_fontsize, gc_cex, gc_lineheight,
+        this_cm, other_cm, scale,
+    )
+
+
+def _transform_wh_from_inches(
+    dimension_inches: float,
+    unit: str,
+    scalemin: float,
+    scalemax: float,
+    gc_fontsize: float,
+    gc_cex: float,
+    gc_lineheight: float,
+    this_cm: float,
+    other_cm: float,
+    scale: float = 1.0,
+) -> float:
+    """Convert a dimension in inches to the target unit.
+
+    Port of R ``unit.c:1379-1408 transformWidthHeightFromINCHES()``.
+    Handles the special NATIVE case (dimension = range fraction).
+    """
+    if unit == "native":
+        this_inches = this_cm / 2.54
+        if this_inches < 1e-10:
+            if dimension_inches != 0:
+                raise ValueError("Viewport has zero dimension(s)")
+            return 0.0
+        # unit.c:1400  (result/(thisCM/2.54))*(scalemax - scalemin)
+        return (dimension_inches / this_inches) * (scalemax - scalemin)
+    return _transform_from_inches(
+        dimension_inches, unit,
+        gc_fontsize, gc_cex, gc_lineheight,
+        this_cm, other_cm, scale,
+    )
+
+
+def _transform_xy_to_npc(
+    value: float, from_unit: str,
+    scalemin: float, scalemax: float,
+) -> float:
+    """Relative unit to NPC -- port of ``unit.c:1418-1431 transformXYtoNPC()``.
+
+    Used when viewport has zero width/height to avoid divide-by-zero.
+    """
+    if from_unit == "npc":
+        return value
+    if from_unit == "native":
+        srange = scalemax - scalemin
+        if srange == 0:
+            return 0.0
+        return (value - scalemin) / srange
+    raise ValueError(f"Cannot convert {from_unit!r} to NPC (zero-dimension special case)")
+
+
+def _transform_wh_to_npc(
+    value: float, from_unit: str,
+    scalemin: float, scalemax: float,
+) -> float:
+    """Relative dimension to NPC -- port of ``unit.c:1433-1446 transformWHtoNPC()``."""
+    if from_unit == "npc":
+        return value
+    if from_unit == "native":
+        srange = scalemax - scalemin
+        if srange == 0:
+            return 0.0
+        return value / srange
+    raise ValueError(f"Cannot convert {from_unit!r} to NPC (zero-dimension special case)")
+
+
+def _transform_xy_from_npc(
+    value: float, to_unit: str,
+    scalemin: float, scalemax: float,
+) -> float:
+    """NPC to relative unit -- port of ``unit.c:1448-1461 transformXYfromNPC()``."""
+    if to_unit == "npc":
+        return value
+    if to_unit == "native":
+        return scalemin + value * (scalemax - scalemin)
+    raise ValueError(f"Cannot convert NPC to {to_unit!r} (zero-dimension special case)")
+
+
+def _transform_wh_from_npc(
+    value: float, to_unit: str,
+    scalemin: float, scalemax: float,
+) -> float:
+    """NPC to relative dimension -- port of ``unit.c:1463-1475 transformWHfromNPC()``."""
+    if to_unit == "npc":
+        return value
+    if to_unit == "native":
+        return value * (scalemax - scalemin)
+    raise ValueError(f"Cannot convert NPC to {to_unit!r} (zero-dimension special case)")
 
 
 # ============================================================================
