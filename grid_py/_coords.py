@@ -852,23 +852,89 @@ def grob_coords(x: Any, closed: Optional[bool] = None) -> Union[GridGrobCoords, 
     if closed is None:
         closed = is_closed(x)
 
-    # Allow grobs to provide their own implementation
-    if hasattr(x, "grob_coords"):
-        return x.grob_coords(closed=closed)
-
     if isinstance(x, GList):
         return _grob_coords_glist(x, closed)
     if isinstance(x, GTree):
         return _grob_coords_gtree(x, closed)
     if isinstance(x, Grob):
+        # Check for custom grob_coords method first
+        if hasattr(x, "grob_coords"):
+            result = x.grob_coords(closed=closed)
+            if result is not None:
+                return result
         return _grob_coords_grob(x, closed)
 
     raise TypeError(f"grob_coords does not support {type(x).__name__}")
 
 
 def _grob_coords_grob(x: Grob, closed: bool) -> GridGrobCoords:
-    """Compute coordinates for a plain grob (mirrors R's grobCoords.grob)."""
-    pts = grob_points(x, closed)
+    """Compute coordinates for a plain grob.
+
+    Port of R ``grobCoords.grob`` (coords.R:272-304).
+    Does full drawing setup:
+      1. Save state (DL, gpar)
+      2. preDraw (makeContext + push vp/gp)
+      3. makeContent
+      4. Call grobPoints to get coordinates
+      5. If vp changed: toDevice → postDraw → fromDevice
+      6. Otherwise: postDraw
+    """
+    import copy
+    from ._state import get_state
+
+    state = get_state()
+    renderer = state.get_renderer()
+
+    # Fallback when no renderer is available (no drawing context)
+    if renderer is None:
+        return grob_points(x, closed)
+
+    # Save current transform for fromDevice (R coords.R:274)
+    cur_transform = None
+    if renderer is not None and hasattr(renderer, "_vp_transform_stack"):
+        cur_transform = renderer._vp_transform_stack[-1].transform.copy()
+
+    original_vp = x.vp
+
+    # Same setup as drawGrob (R coords.R:276-284)
+    saved_dl_on = state._dl_on
+    state.set_display_list_on(False)
+    saved_gpar = copy.copy(state.get_gpar())
+
+    try:
+        # preDraw: makeContext + push vp/gp + preDrawDetails
+        x = x.make_context()
+        from ._draw import _push_vp_gp
+        _push_vp_gp(x)
+        x.pre_draw_details()
+
+        # makeContent
+        x = x.make_content()
+
+        # Check if vp changed (R coords.R:287)
+        vpgrob = (x.vp is not None) or (original_vp is not x.vp)
+
+        # Get points (R coords.R:290)
+        pts = grob_points(x, closed)
+
+        if vpgrob and not pts.is_empty():
+            # Transform to device coordinates (R coords.R:292-294)
+            pts = _to_device_grob_coords(pts, state)
+
+        # postDraw: postDrawDetails + pop vp
+        x.post_draw_details()
+        if x.vp is not None:
+            from ._draw import _pop_grob_vp
+            _pop_grob_vp(x.vp)
+
+        if vpgrob and not pts.is_empty() and cur_transform is not None:
+            # Transform back from device (R coords.R:299-301)
+            pts = _from_device_grob_coords(pts, cur_transform)
+
+    finally:
+        state.replace_gpar(saved_gpar)
+        state.set_display_list_on(saved_dl_on)
+
     return pts
 
 
@@ -881,18 +947,171 @@ def _grob_coords_glist(x: GList, closed: bool) -> GridGTreeCoords:
 
 
 def _grob_coords_gtree(x: GTree, closed: bool) -> GridGTreeCoords:
-    """Compute coordinates for a gTree (mirrors R's grobCoords.gTree)."""
-    children_order = getattr(x, "children_order", None)
-    children = getattr(x, "children", None)
+    """Compute coordinates for a gTree.
 
-    if children is not None and len(children) > 0:
-        if children_order is not None:
-            ordered = [children[k] for k in children_order]
+    Port of R ``grobCoords.gTree`` (coords.R:312-346).
+    Does full drawing setup like drawGTree, then recursively
+    calls grobCoords on children.
+    """
+    import copy
+    from ._state import get_state
+
+    state = get_state()
+    renderer = state.get_renderer()
+
+    # Fallback when no renderer is available (no drawing context)
+    if renderer is None:
+        children_order = getattr(x, "_children_order", [])
+        children = getattr(x, "_children", {})
+        if children and len(children) > 0:
+            ordered = [children[k] for k in children_order if k in children]
+            pts = [grob_coords(child, closed) for child in ordered]
+            return GridGTreeCoords(pts, name=x.name)
+        return empty_gtree_coords(x.name)
+
+    cur_transform = None
+    if renderer is not None and hasattr(renderer, "_vp_transform_stack"):
+        cur_transform = renderer._vp_transform_stack[-1].transform.copy()
+
+    original_vp = x.vp
+
+    # Same setup as drawGTree (R coords.R:316-322)
+    saved_dl_on = state._dl_on
+    state.set_display_list_on(False)
+    saved_gpar = copy.copy(state.get_gpar())
+    saved_current_grob = getattr(state, "_current_grob", None)
+
+    try:
+        # preDraw.gTree: makeContext + setCurrentGrob + push vp/gp + childrenvp
+        x = x.make_context()
+        state._current_grob = x
+
+        from ._draw import _push_vp_gp
+        _push_vp_gp(x)
+
+        # Push children viewport if present (R grob.R:1792-1801)
+        children_vp = getattr(x, "childrenvp", None) or getattr(x, "children_vp", None)
+        if children_vp is not None:
+            from ._viewport import push_viewport, up_viewport
+            from ._draw import _vp_depth
+            temp_gp = copy.copy(state.get_gpar())
+            push_viewport(children_vp, recording=False)
+            up_viewport(_vp_depth(children_vp), recording=False)
+            state.set_gpar(temp_gp)
+
+        x.pre_draw_details()
+
+        # makeContent (R coords.R:327)
+        x = x.make_content()
+
+        # Check if vp changed (R coords.R:330)
+        vpgrob = (x.vp is not None) or (original_vp is not x.vp)
+
+        # Get children coords (R coords.R:332-334)
+        children_order = x._children_order if hasattr(x, "_children_order") else []
+        children = x._children if hasattr(x, "_children") else {}
+
+        if children and len(children) > 0:
+            ordered = [children[k] for k in children_order if k in children]
+            child_pts = [grob_coords(child, closed) for child in ordered]
+            pts = GridGTreeCoords(child_pts, name=x.name)
         else:
-            ordered = list(children)
-        pts = [grob_coords(child, closed) for child in ordered]
-        return GridGTreeCoords(pts, name=x.name)
-    return empty_gtree_coords(x.name)
+            pts = empty_gtree_coords(x.name)
+
+        if vpgrob and not pts.is_empty():
+            pts = _to_device_gtree_coords(pts, state)
+
+        # postDraw
+        x.post_draw_details()
+        if x.vp is not None:
+            from ._draw import _pop_grob_vp
+            _pop_grob_vp(x.vp)
+
+        if vpgrob and not pts.is_empty() and cur_transform is not None:
+            pts = _from_device_gtree_coords(pts, cur_transform)
+
+    finally:
+        state.replace_gpar(saved_gpar)
+        state._current_grob = saved_current_grob
+        state.set_display_list_on(saved_dl_on)
+
+    return pts
+
+
+# ---------------------------------------------------------------------------
+# toDevice / fromDevice helpers for grobCoords
+# Port of R coords.R:157-195
+# ---------------------------------------------------------------------------
+
+
+def _to_device_grob_coords(
+    pts: GridGrobCoords, state: Any
+) -> GridGrobCoords:
+    """Convert grob coordinates to device inches via deviceLoc."""
+    from ._units import device_loc, Unit
+
+    new_coords = []
+    for coord in pts:
+        if coord.is_empty():
+            new_coords.append(coord)
+            continue
+        # R coords.R:163-165: deviceLoc(unit(x,"in"), unit(y,"in"), valueOnly=TRUE)
+        result = device_loc(
+            Unit(coord.x, "inches"),
+            Unit(coord.y, "inches"),
+            value_only=True,
+        )
+        new_coords.append(GridCoords(result["x"], result["y"], name=coord.name))
+    return GridGrobCoords(new_coords, name=pts.name, rule=pts.rule)
+
+
+def _from_device_grob_coords(
+    pts: GridGrobCoords, transform: np.ndarray
+) -> GridGrobCoords:
+    """Transform grob coordinates from device space.
+
+    R coords.R:182-184: cbind(x,y,1) %*% solve(trans)
+    """
+    inv = np.linalg.solve(transform, np.eye(3))
+    new_coords = []
+    for coord in pts:
+        if coord.is_empty():
+            new_coords.append(coord)
+            continue
+        pts_matrix = np.column_stack([coord.x, coord.y, np.ones(len(coord.x))])
+        result = pts_matrix @ inv
+        new_coords.append(GridCoords(result[:, 0], result[:, 1], name=coord.name))
+    return GridGrobCoords(new_coords, name=pts.name, rule=pts.rule)
+
+
+def _to_device_gtree_coords(
+    pts: GridGTreeCoords, state: Any
+) -> GridGTreeCoords:
+    """Convert gTree coordinates to device inches."""
+    new_children = {}
+    for key, child in pts._children.items():
+        if isinstance(child, GridGrobCoords):
+            new_children[key] = _to_device_grob_coords(child, state)
+        elif isinstance(child, GridGTreeCoords):
+            new_children[key] = _to_device_gtree_coords(child, state)
+        else:
+            new_children[key] = child
+    return GridGTreeCoords(new_children, name=pts.name)
+
+
+def _from_device_gtree_coords(
+    pts: GridGTreeCoords, transform: np.ndarray
+) -> GridGTreeCoords:
+    """Transform gTree coordinates from device space."""
+    new_children = {}
+    for key, child in pts._children.items():
+        if isinstance(child, GridGrobCoords):
+            new_children[key] = _from_device_grob_coords(child, transform)
+        elif isinstance(child, GridGTreeCoords):
+            new_children[key] = _from_device_gtree_coords(child, transform)
+        else:
+            new_children[key] = child
+    return GridGTreeCoords(new_children, name=pts.name)
 
 
 def grob_points(x: Any, closed: Optional[bool] = None) -> GridGrobCoords:
@@ -917,14 +1136,23 @@ def grob_points(x: Any, closed: Optional[bool] = None) -> GridGrobCoords:
     if closed is None:
         closed = is_closed(x)
 
-    # Allow grobs to provide their own implementation
-    if hasattr(x, "grob_points"):
-        return x.grob_points(closed=closed)
-
     if isinstance(x, GList):
         return _grob_points_glist(x, closed)
     if isinstance(x, GTree):
         return _grob_points_gtree(x, closed)
+
+    # Dispatch by _grid_class to per-primitive implementations
+    # (port of R coords.R:356-673)
+    grid_class = getattr(x, "_grid_class", None) or ""
+    dispatch_fn = _GROB_POINTS_DISPATCH.get(grid_class)
+    if dispatch_fn is not None:
+        return dispatch_fn(x, closed)
+
+    # Allow grobs to provide their own custom implementation
+    if hasattr(x, "grob_points"):
+        result = x.grob_points(closed=closed)
+        if result is not None:
+            return result
 
     # Default: return empty
     name = getattr(x, "name", "unknown")
@@ -956,3 +1184,351 @@ def _grob_points_gtree(x: GTree, closed: bool) -> GridGTreeCoords:
         pts = [grob_coords(child, closed) for child in ordered]
         return GridGTreeCoords(pts, name=x.name)
     return empty_gtree_coords(x.name)
+
+
+# ---------------------------------------------------------------------------
+# Per-primitive grobPoints implementations
+# Port of R coords.R:356-673
+# ---------------------------------------------------------------------------
+
+
+def _grob_points_circle(x: Grob, closed: bool = True, n: int = 100) -> GridGrobCoords:
+    """grobPoints.circle -- R coords.R:368-388.
+
+    Returns n points around each circle perimeter (closed=True)
+    or empty (closed=False).
+    """
+    if not closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y, convert_width, convert_height
+
+    cx = convert_x(x.x, "inches", valueOnly=True)
+    cy = convert_y(x.y, "inches", valueOnly=True)
+    # R: r = pmin(convertWidth(r), convertHeight(r))
+    rw = convert_width(x.r, "inches", valueOnly=True)
+    rh = convert_height(x.r, "inches", valueOnly=True)
+    r = np.minimum(rw, rh)
+
+    t = np.linspace(0, 2 * np.pi, n + 1)[:-1]
+
+    # Recycle via broadcasting (R: cbind(cx, cy, r))
+    data = np.column_stack([
+        np.broadcast_to(cx, max(len(cx), len(cy), len(r))),
+        np.broadcast_to(cy, max(len(cx), len(cy), len(r))),
+        np.broadcast_to(r, max(len(cx), len(cy), len(r))),
+    ])
+    ncirc = data.shape[0]
+    pts = []
+    for i in range(ncirc):
+        px = data[i, 0] + data[i, 2] * np.cos(t)
+        py = data[i, 1] + data[i, 2] * np.sin(t)
+        pts.append(GridCoords(px, py, name=str(i + 1)))
+    return GridGrobCoords(pts, name=x.name)
+
+
+def _grob_points_rect(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.rect -- R coords.R:529-547.
+
+    Returns 4 corners of each rect (closed=True) or empty.
+    """
+    if not closed:
+        return empty_grob_coords(x.name)
+
+    from ._just import resolve_hjust, resolve_vjust
+    from ._units import convert_x, convert_y, convert_width, convert_height
+
+    just = getattr(x, "just", None) or "centre"
+    hjust = resolve_hjust(just, getattr(x, "hjust", None))
+    vjust = resolve_vjust(just, getattr(x, "vjust", None))
+
+    w = convert_width(x.width, "inches", valueOnly=True)
+    h = convert_height(x.height, "inches", valueOnly=True)
+    xc = convert_x(x.x, "inches", valueOnly=True)
+    yc = convert_y(x.y, "inches", valueOnly=True)
+
+    left = xc - hjust * w
+    bottom = yc - vjust * h
+    right = left + w
+    top = bottom + h
+
+    # Recycle via column_stack (R: cbind(left, right, bottom, top))
+    rects = np.column_stack([
+        np.broadcast_to(left, max(len(left), len(right), len(bottom), len(top))),
+        np.broadcast_to(right, max(len(left), len(right), len(bottom), len(top))),
+        np.broadcast_to(bottom, max(len(left), len(right), len(bottom), len(top))),
+        np.broadcast_to(top, max(len(left), len(right), len(bottom), len(top))),
+    ])
+    pts = []
+    for i in range(rects.shape[0]):
+        # R: xyListFromMatrix(rects, c(1,1,2,2), c(3,4,4,3))
+        # Corners: (left,bottom), (left,top), (right,top), (right,bottom)
+        px = np.array([rects[i, 0], rects[i, 0], rects[i, 1], rects[i, 1]])
+        py = np.array([rects[i, 2], rects[i, 3], rects[i, 3], rects[i, 2]])
+        pts.append(GridCoords(px, py, name=str(i + 1)))
+    return GridGrobCoords(pts, name=x.name)
+
+
+def _grob_points_lines(x: Grob, closed: bool = False) -> GridGrobCoords:
+    """grobPoints.lines -- R coords.R:390-400."""
+    if closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y
+
+    xx = convert_x(x.x, "inches", valueOnly=True)
+    yy = convert_y(x.y, "inches", valueOnly=True)
+    # Recycle via column_stack
+    lines = np.column_stack([
+        np.broadcast_to(xx, max(len(xx), len(yy))),
+        np.broadcast_to(yy, max(len(xx), len(yy))),
+    ])
+    return GridGrobCoords(
+        [GridCoords(lines[:, 0], lines[:, 1], name="1")],
+        name=x.name,
+    )
+
+
+def _grob_points_polyline(x: Grob, closed: bool = False) -> GridGrobCoords:
+    """grobPoints.polyline -- R coords.R:402-429."""
+    if closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y
+
+    xx = convert_x(x.x, "inches", valueOnly=True)
+    yy = convert_y(x.y, "inches", valueOnly=True)
+
+    grob_id = getattr(x, "id", None)
+    grob_id_lengths = getattr(x, "id_lengths", None)
+
+    if grob_id is None and grob_id_lengths is None:
+        return GridGrobCoords(
+            [GridCoords(xx, yy, name="1")], name=x.name,
+        )
+
+    if grob_id is None:
+        n = len(grob_id_lengths)
+        grob_id = np.repeat(np.arange(1, n + 1), grob_id_lengths)
+    else:
+        grob_id = np.asarray(grob_id)
+
+    unique_ids = np.unique(grob_id)
+    if len(unique_ids) > 1:
+        pts = []
+        for uid in unique_ids:
+            mask = grob_id == uid
+            pts.append(GridCoords(xx[mask], yy[mask], name=str(uid)))
+        return GridGrobCoords(pts, name=x.name)
+    return GridGrobCoords(
+        [GridCoords(xx, yy, name="1")], name=x.name,
+    )
+
+
+def _grob_points_polygon(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.polygon -- R coords.R:437-464."""
+    if not closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y
+
+    xx = convert_x(x.x, "inches", valueOnly=True)
+    yy = convert_y(x.y, "inches", valueOnly=True)
+
+    grob_id = getattr(x, "id", None)
+    grob_id_lengths = getattr(x, "id_lengths", None)
+
+    if grob_id is None and grob_id_lengths is None:
+        return GridGrobCoords(
+            [GridCoords(xx, yy, name="1")], name=x.name,
+        )
+
+    if grob_id is None:
+        n = len(grob_id_lengths)
+        grob_id = np.repeat(np.arange(1, n + 1), grob_id_lengths)
+    else:
+        grob_id = np.asarray(grob_id)
+
+    unique_ids = np.unique(grob_id)
+    if len(unique_ids) > 1:
+        pts = []
+        for uid in unique_ids:
+            mask = grob_id == uid
+            pts.append(GridCoords(xx[mask], yy[mask], name=str(uid)))
+        return GridGrobCoords(pts, name=x.name)
+    return GridGrobCoords(
+        [GridCoords(xx, yy, name="1")], name=x.name,
+    )
+
+
+def _grob_points_segments(x: Grob, closed: bool = False) -> GridGrobCoords:
+    """grobPoints.segments -- R coords.R:549-563."""
+    if closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y
+
+    x0 = convert_x(x.x0, "inches", valueOnly=True)
+    x1 = convert_x(x.x1, "inches", valueOnly=True)
+    y0 = convert_y(x.y0, "inches", valueOnly=True)
+    y1 = convert_y(x.y1, "inches", valueOnly=True)
+
+    # Recycle via column_stack (R: cbind(x0, x1, y0, y1))
+    maxlen = max(len(x0), len(x1), len(y0), len(y1))
+    xy = np.column_stack([
+        np.broadcast_to(x0, maxlen),
+        np.broadcast_to(x1, maxlen),
+        np.broadcast_to(y0, maxlen),
+        np.broadcast_to(y1, maxlen),
+    ])
+    pts = []
+    for i in range(xy.shape[0]):
+        # R: xyListFromMatrix(xy, 1:2, 3:4)
+        px = np.array([xy[i, 0], xy[i, 1]])
+        py = np.array([xy[i, 2], xy[i, 3]])
+        pts.append(GridCoords(px, py, name=str(i + 1)))
+    return GridGrobCoords(pts, name=x.name)
+
+
+def _grob_points_pathgrob(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.pathgrob -- R coords.R:474-527.
+
+    Handles pathId and id for multiple paths/shapes.
+    """
+    if not closed:
+        return empty_grob_coords(x.name)
+
+    from ._units import convert_x, convert_y
+
+    xx = convert_x(x.x, "inches", valueOnly=True)
+    yy = convert_y(x.y, "inches", valueOnly=True)
+    rule = getattr(x, "rule", None)
+
+    grob_id = getattr(x, "id", None)
+    grob_id_lengths = getattr(x, "id_lengths", None)
+
+    if grob_id is None and grob_id_lengths is None:
+        return GridGrobCoords(
+            [GridCoords(xx, yy, name="1")],
+            name=x.name, rule=rule,
+        )
+
+    if grob_id is None:
+        n = len(grob_id_lengths)
+        grob_id = np.repeat(np.arange(1, n + 1), grob_id_lengths)
+    else:
+        grob_id = np.asarray(grob_id)
+
+    unique_ids = np.unique(grob_id)
+    pts = []
+    for uid in unique_ids:
+        mask = grob_id == uid
+        pts.append(GridCoords(xx[mask], yy[mask], name=str(uid)))
+    return GridGrobCoords(pts, name=x.name, rule=rule)
+
+
+def _grob_points_text(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.text -- R coords.R:591-612.
+
+    Returns bounding box (4 corners) if closed, empty otherwise.
+    Uses string metrics to estimate the text bounds.
+    """
+    if not closed:
+        return empty_grob_coords(x.name)
+
+    from ._just import resolve_hjust, resolve_vjust
+    from ._units import convert_x, convert_y, Unit
+    from ._font_metrics import get_font_backend
+
+    label = getattr(x, "label", "")
+    if isinstance(label, (list, tuple)):
+        label = label[0] if label else ""
+
+    just = getattr(x, "just", None) or "centre"
+    hjust = resolve_hjust(just, getattr(x, "hjust", None))
+    vjust = resolve_vjust(just, getattr(x, "vjust", None))
+
+    # Get text position in inches
+    xpos = convert_x(x.x, "inches", valueOnly=True)
+    ypos = convert_y(x.y, "inches", valueOnly=True)
+
+    # Measure text
+    backend = get_font_backend()
+    gp = getattr(x, "gp", None)
+    metric = backend.measure(str(label), gp)
+
+    w = metric.get("width", 0.0)
+    asc = metric.get("ascent", 0.0)
+    desc = metric.get("descent", 0.0)
+    h = asc + desc
+
+    if w == 0 and h == 0:
+        return empty_grob_coords(x.name)
+
+    # Compute bounds based on justification
+    left = float(xpos[0]) - hjust * w
+    bottom = float(ypos[0]) - vjust * h
+    right = left + w
+    top = bottom + h
+
+    return GridGrobCoords(
+        [GridCoords(
+            np.array([left, left, right, right]),
+            np.array([bottom, top, top, bottom]),
+            name="1",
+        )],
+        name=x.name,
+    )
+
+
+def _grob_points_xspline(x: Grob, closed: Optional[bool] = None) -> GridGrobCoords:
+    """grobPoints.xspline -- R coords.R:565-586.
+
+    Returns traced spline points. Falls back to control points if
+    the spline tracing function is unavailable.
+    """
+    is_open = getattr(x, "open", True)
+    if closed is None:
+        closed = not is_open
+
+    if (closed and not is_open) or (not closed and is_open):
+        from ._units import convert_x, convert_y
+        xx = convert_x(x.x, "inches", valueOnly=True)
+        yy = convert_y(x.y, "inches", valueOnly=True)
+        return GridGrobCoords(
+            [GridCoords(xx, yy, name="1")],
+            name=x.name,
+        )
+    return empty_grob_coords(x.name)
+
+
+def _grob_points_rastergrob(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.rastergrob -- R coords.R:639-641. Always empty."""
+    return empty_grob_coords(x.name)
+
+
+def _grob_points_null(x: Grob, closed: bool = True) -> GridGrobCoords:
+    """grobPoints.null -- R coords.R:647-649. Always empty."""
+    return empty_grob_coords(x.name)
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher: map _grid_class → grobPoints implementation
+# ---------------------------------------------------------------------------
+
+_GROB_POINTS_DISPATCH: Dict[str, Any] = {
+    "circle": _grob_points_circle,
+    "rect": _grob_points_rect,
+    "lines": _grob_points_lines,
+    "polyline": _grob_points_polyline,
+    "polygon": _grob_points_polygon,
+    "segments": _grob_points_segments,
+    "pathgrob": _grob_points_pathgrob,
+    "text": _grob_points_text,
+    "xspline": _grob_points_xspline,
+    "rastergrob": _grob_points_rastergrob,
+    "null": _grob_points_null,
+    "move.to": lambda x, closed=True: empty_grob_coords(x.name),
+    "line.to": lambda x, closed=True: empty_grob_coords(x.name),
+    "clip": lambda x, closed=True: empty_grob_coords(x.name),
+}

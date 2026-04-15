@@ -197,9 +197,12 @@ class Grob:
             self._name = _auto_name(suffix=self._grid_class)
         else:
             self._name = str(self._name)
-        # Check gp
+        # Check gp – auto-convert dict to Gpar for convenience
         if self._gp is not None and not isinstance(self._gp, Gpar):
-            raise TypeError("invalid 'gp' slot: expected Gpar or None")
+            if isinstance(self._gp, dict):
+                self._gp = Gpar(**self._gp)
+            else:
+                raise TypeError("invalid 'gp' slot: expected Gpar, dict, or None")
         # Check vp (duck typed -- accept anything with a reasonable interface)
         if self._vp is not None:
             self._vp = self._check_vp(self._vp)
@@ -871,10 +874,44 @@ def _resolve_path(path: Union[str, GPath]) -> GPath:
     raise TypeError(f"invalid path type: {type(path).__name__}")
 
 
-def get_grob(gtree: GTree, path: Union[str, GPath]) -> Grob:
+def _name_match(pattern: str, name: str, grep: bool) -> bool:
+    """Check if *pattern* matches *name*.
+
+    Port of R ``grob.R:641-648 nameMatch()``.
+    When *grep* is ``True``, *pattern* is treated as a regex.
+    """
+    if grep:
+        import re
+        return bool(re.search(pattern, name))
+    return pattern == name
+
+
+def _name_positions(pattern: str, names: list, grep: bool) -> list:
+    """Return indices where *pattern* matches within *names*.
+
+    Port of R ``grob.R:653-662 namePos()``.
+    When *grep* is ``True``, may return multiple positions.
+    """
+    if grep:
+        import re
+        return [i for i, n in enumerate(names) if re.search(pattern, n)]
+    else:
+        for i, n in enumerate(names):
+            if n == pattern:
+                return [i]
+        return []
+
+
+def get_grob(
+    gtree: GTree,
+    path: Union[str, GPath],
+    strict: bool = False,
+    grep: bool = False,
+    global_: bool = False,
+) -> Union[Grob, GList]:
     """Retrieve a child grob from *gtree* by *path*.
 
-    Currently only supports single-depth (direct child) lookup.
+    Port of R ``getGrob()`` (grob.R:370-388).
 
     Parameters
     ----------
@@ -882,32 +919,117 @@ def get_grob(gtree: GTree, path: Union[str, GPath]) -> Grob:
         The tree to search.
     path : str or GPath
         Name or path to the desired child.
+    strict : bool
+        If ``True``, path must match the full tree structure exactly.
+    grep : bool
+        If ``True``, use regex matching for names.
+    global_ : bool
+        If ``True``, return all matches as a :class:`GList`.
 
     Returns
     -------
-    Grob
-
-    Raises
-    ------
-    TypeError
-        If *gtree* is not a :class:`GTree`.
-    KeyError
-        If the child cannot be found.
+    Grob or GList
     """
     if not isinstance(gtree, GTree):
         raise TypeError("can only get a child from a GTree")
     gpath = _resolve_path(path)
-    if gpath.n == 1:
+
+    if gpath.n == 1 and not grep and not global_:
+        # Fast path: exact single-name lookup
         return gtree.get_child(gpath.name)
-    # Multi-depth: walk the tree
-    current: Grob = gtree
-    for component in gpath.components[:-1]:
+
+    if gpath.n == 1 and not grep and not global_:
+        # Fast path: exact single-name lookup
+        return gtree.get_child(gpath.name)
+
+    # Multi-depth without grep: walk the tree with proper errors
+    if not grep and not global_ and gpath.n > 1:
+        current: Grob = gtree
+        for component in gpath.components[:-1]:
+            if not isinstance(current, GTree):
+                raise KeyError(
+                    f"'{component}' is not a GTree; cannot descend further (non-GTree)"
+                )
+            current = current.get_child(component)
         if not isinstance(current, GTree):
-            raise KeyError(f"'{component}' is not a GTree; cannot descend further")
-        current = current.get_child(component)
-    if not isinstance(current, GTree):
-        raise KeyError(f"cannot get child '{gpath.name}' from a non-GTree grob")
-    return current.get_child(gpath.name)
+            raise KeyError(
+                f"cannot get child '{gpath.name}' from a non-GTree grob"
+            )
+        return current.get_child(gpath.name)
+
+    # General case: search children with grep/global support
+    results = _get_grob_from_gpath(gtree, None, gpath, strict, grep, global_)
+
+    if results is None:
+        raise KeyError(f"Grob '{path}' not found")
+
+    if global_ and isinstance(results, list):
+        return GList(*results)
+    return results
+
+
+def _get_grob_from_gpath(grob, pathsofar, gpath, strict, grep, global_):
+    """Recursive grob search -- port of R ``getGrobFromGPath`` (grob.R:758-862)."""
+    if isinstance(grob, GTree):
+        # Check if the gTree itself matches (depth 1 path)
+        if gpath.n == 1 and _name_match(gpath.name, grob.name, grep):
+            return grob
+
+        # Search children
+        found_list = []
+        for child_name in grob._children_order:
+            child = grob._children.get(child_name)
+            if child is None:
+                continue
+
+            if not strict and gpath.n == 1:
+                # Non-strict, single name: check children directly, then recurse
+                if _name_match(gpath.name, child_name, grep):
+                    if not global_:
+                        return child
+                    found_list.append(child)
+                else:
+                    # Recurse into child
+                    result = _get_grob_from_gpath(
+                        child, child_name, gpath, strict, grep, global_)
+                    if result is not None:
+                        if not global_:
+                            return result
+                        if isinstance(result, list):
+                            found_list.extend(result)
+                        else:
+                            found_list.append(result)
+            else:
+                # Strict or multi-depth path
+                if gpath.n == 1:
+                    if _name_match(gpath.name, child_name, grep):
+                        if not global_:
+                            return child
+                        found_list.append(child)
+                elif isinstance(child, GTree):
+                    # Multi-depth: check if first path component matches
+                    if _name_match(gpath.components[0], child_name, grep):
+                        sub_path = GPath(*gpath.components[1:])
+                        result = _get_grob_from_gpath(
+                            child, child_name, sub_path, strict, grep, global_)
+                        if result is not None:
+                            if not global_:
+                                return result
+                            if isinstance(result, list):
+                                found_list.extend(result)
+                            else:
+                                found_list.append(result)
+
+        if found_list:
+            return found_list if global_ else found_list[0]
+        return None
+
+    elif isinstance(grob, Grob):
+        if gpath.n == 1 and _name_match(gpath.name, grob.name, grep):
+            return grob
+        return None
+
+    return None
 
 
 def set_grob(gtree: GTree, path: Union[str, GPath], value: Grob) -> GTree:
