@@ -315,7 +315,7 @@ class GridRenderer(ABC):
             gc_cex=cex,
             gc_lineheight=lineheight,
             str_metric_fn=self._str_metric_fn,
-            grob_metric_fn=None,
+            grob_metric_fn=self._grob_metric_fn,
         )
         self._vp_transform_stack.append(vtr)
         self._vp_obj_stack.append(vp)
@@ -457,6 +457,180 @@ class GridRenderer(ABC):
         except Exception:
             return 1.0
 
+    # ===================================================================== #
+    # evaluateGrobUnit -- port of R unit.c:325-590                          #
+    # ===================================================================== #
+
+    def _evaluate_grob_unit(
+        self,
+        grob: Any,
+        unit_type: str,
+        value: float = 1.0,
+    ) -> Optional[float]:
+        """Evaluate a grobwidth/grobheight/etc. unit, returning inches.
+
+        Port of R's ``evaluateGrobUnit()`` (unit.c:325-590).
+        Performs the full cycle:
+          1. Save state (gpar, current grob, DL recording)
+          2. If *grob* is a gPath (string), resolve to actual grob
+          3. ``preDraw(grob)`` — pushes grob's vp/gp
+          4. ``widthDetails(grob)``/``heightDetails(grob)`` — get result Unit
+          5. Convert result Unit to inches *within grob's viewport context*
+          6. ``postDraw(grob)`` — pops grob's vp
+          7. Restore state
+
+        Parameters
+        ----------
+        grob : Grob or str
+            The grob (or gPath name) to measure.
+        unit_type : str
+            One of ``"grobwidth"``, ``"grobheight"``, ``"grobascent"``,
+            ``"grobdescent"``, ``"grobx"``, ``"groby"``.
+        value : float
+            The numeric value of the unit (angle for grobx/groby).
+
+        Returns
+        -------
+        float or None
+            Size in inches, or None on failure.
+        """
+        import copy
+        from ._state import get_state
+        from ._grob import Grob, GTree
+        from ._path import GPath
+        from ._size import (
+            width_details, height_details,
+            ascent_details, descent_details,
+        )
+
+        state = get_state()
+
+        # --- Resolve gPath to actual grob (R unit.c:405-431) ---
+        if isinstance(grob, (str, GPath)):
+            grob = self._find_grob_for_metric(grob, state)
+            if grob is None:
+                return 0.0
+
+        if not isinstance(grob, Grob):
+            return 0.0
+
+        # --- Save state (R unit.c:355-377) ---
+        saved_dl_on = state._dl_on
+        state.set_display_list_on(False)
+        saved_gpar = copy.copy(state.get_gpar())
+        saved_current_grob = getattr(state, "_current_grob", None)
+
+        try:
+            # --- preDraw(grob) (R unit.c:434-435) ---
+            # This may push viewports and set gpar
+            from ._draw import _push_vp_gp, _pop_grob_vp
+            grob = grob.make_context()
+            if isinstance(grob, GTree):
+                state._current_grob = grob
+            _push_vp_gp(grob)
+            grob.pre_draw_details()
+
+            # --- After preDraw, re-establish viewport context ---
+            # (R unit.c:451-456)
+            vtr = self._vp_transform_stack[-1]
+            gp = state.get_gpar()
+            fontsize, cex, lineheight = self._gpar_font_params(gp)
+
+            # --- Call widthDetails/heightDetails (R unit.c:460-485) ---
+            if unit_type == "grobwidth":
+                result_unit = width_details(grob)
+            elif unit_type == "grobheight":
+                result_unit = height_details(grob)
+            elif unit_type == "grobascent":
+                result_unit = ascent_details(grob)
+            elif unit_type == "grobdescent":
+                result_unit = descent_details(grob)
+            else:
+                # grobx/groby — not yet implemented, return 0
+                result_unit = None
+
+            if result_unit is None:
+                result = 0.0
+            else:
+                from ._units import Unit
+                if not isinstance(result_unit, Unit):
+                    result = 0.0
+                elif (len(result_unit) == 1
+                      and result_unit._units[0] == "null"):
+                    # "null" units evaluate to 0 (R unit.c:530-531)
+                    result = 0.0
+                else:
+                    # --- Convert result to inches in grob's context ---
+                    # (R unit.c:529-538 / 540-551)
+                    if unit_type in ("grobwidth",):
+                        result = self._resolve_to_inches(
+                            result_unit, "x", True, gp)
+                    elif unit_type in ("grobheight", "grobascent", "grobdescent"):
+                        result = self._resolve_to_inches(
+                            result_unit, "y", True, gp)
+                    else:
+                        result = 0.0
+
+            # --- postDraw(grob) (R unit.c:556-557) ---
+            grob.post_draw_details()
+            if grob.vp is not None:
+                _pop_grob_vp(grob.vp)
+
+        except Exception:
+            result = 0.0
+        finally:
+            # --- Restore state (R unit.c:561-562) ---
+            state.replace_gpar(saved_gpar)
+            state._current_grob = saved_current_grob
+            state.set_display_list_on(saved_dl_on)
+
+        return result
+
+    def _find_grob_for_metric(self, grob_ref: Any, state: Any) -> Any:
+        """Resolve a gPath/string to an actual grob for metric evaluation.
+
+        Port of R unit.c:405-431: if current grob is NULL, search the
+        display list; otherwise search the current grob's children.
+        """
+        from ._grob import Grob, GTree
+        from ._path import GPath
+        from ._display_list import DLDrawGrob
+
+        name = str(grob_ref)
+
+        # Check current grob's children first (R unit.c:420-425)
+        current_grob = getattr(state, "_current_grob", None)
+        if current_grob is not None and isinstance(current_grob, GTree):
+            child = current_grob._children.get(name)
+            if child is not None:
+                return child
+
+        # Search display list (R unit.c:413-418)
+        dl = state.get_display_list()
+        for item in dl:
+            if isinstance(item, DLDrawGrob) and item.grob is not None:
+                if getattr(item.grob, "name", None) == name:
+                    return item.grob
+                # Search inside GTrees
+                if isinstance(item.grob, GTree):
+                    child = item.grob._children.get(name)
+                    if child is not None:
+                        return child
+
+        return None
+
+    def _grob_metric_fn(self, grob: Any, unit_type: str, value: float) -> Optional[float]:
+        """Callback for _transform_to_inches grob_metric_fn parameter.
+
+        Delegates to _evaluate_grob_unit which does the full
+        preDraw/widthDetails/postDraw cycle.
+        """
+        return self._evaluate_grob_unit(grob, unit_type, value)
+
+    # ===================================================================== #
+    # Unit → inches resolution (core pipeline)                              #
+    # ===================================================================== #
+
     def _resolve_to_inches(
         self,
         unit_obj: Any,
@@ -485,7 +659,7 @@ class GridRenderer(ABC):
             other_cm=vtr.height_cm if axis == "x" else vtr.width_cm,
             axis=axis, is_dim=is_dim,
             str_metric_fn=self._str_metric_fn,
-            grob_metric_fn=None,
+            grob_metric_fn=self._grob_metric_fn,
             scale=self._get_scale(),
         )
 
@@ -512,7 +686,7 @@ class GridRenderer(ABC):
             other_cm=vtr.height_cm if axis == "x" else vtr.width_cm,
             axis=axis, is_dim=is_dim,
             str_metric_fn=self._str_metric_fn,
-            grob_metric_fn=None,
+            grob_metric_fn=self._grob_metric_fn,
             scale=self._get_scale(),
         )
 

@@ -266,25 +266,91 @@ def _null_height_details(grob: Any) -> Unit:
 # -- rect grob (R: primitives.R:1146-1166) ---------------------------------
 
 def _rect_width_details(grob: Any) -> Unit:
-    """Width of a rect grob: its own *width* attribute.
+    """Width of a rect grob: actual bounding box width in inches.
 
-    Mirrors ``widthDetails.rect`` (R ``primitives.R:1146``).
+    Port of R ``widthDetails.rect`` (primitives.R:1146) which calls
+    ``C_rectBounds``.  Resolves x, width, hjust to inches, computes
+    the bounding box ``xmax - xmin`` across all rectangles.
     """
-    w = getattr(grob, "width", None)
-    if w is not None and isinstance(w, Unit):
-        return w
-    return Unit(1, "npc")
+    from ._just import resolve_hjust, resolve_vjust
+
+    renderer = _get_renderer()
+    if renderer is None:
+        # Fallback: return the raw width attribute
+        w = getattr(grob, "width", None)
+        if w is not None and isinstance(w, Unit):
+            return w
+        return Unit(1, "npc")
+
+    gp = getattr(grob, "gp", None)
+    x_unit = getattr(grob, "x", None)
+    w_unit = getattr(grob, "width", None)
+    if x_unit is None or w_unit is None:
+        return Unit(0, "inches")
+
+    just = getattr(grob, "just", None) or "centre"
+    hjust_val = getattr(grob, "hjust", None)
+    hjust = resolve_hjust(just, hjust_val)
+
+    n = max(len(x_unit), len(w_unit))
+    xmin = float("inf")
+    xmax = float("-inf")
+    for i in range(n):
+        cx = renderer._resolve_to_inches_idx(x_unit, i % len(x_unit), "x", False, gp)
+        w = renderer._resolve_to_inches_idx(w_unit, i % len(w_unit), "x", True, gp)
+        left = cx - hjust * w
+        right = left + w
+        if left < xmin:
+            xmin = left
+        if right > xmax:
+            xmax = right
+
+    if xmin == float("inf"):
+        return Unit(0, "inches")
+    return Unit(xmax - xmin, "inches")
 
 
 def _rect_height_details(grob: Any) -> Unit:
-    """Height of a rect grob: its own *height* attribute.
+    """Height of a rect grob: actual bounding box height in inches.
 
-    Mirrors ``heightDetails.rect`` (R ``primitives.R:1157``).
+    Port of R ``heightDetails.rect`` (primitives.R:1157) which calls
+    ``C_rectBounds``.
     """
-    h = getattr(grob, "height", None)
-    if h is not None and isinstance(h, Unit):
-        return h
-    return Unit(1, "npc")
+    from ._just import resolve_hjust, resolve_vjust
+
+    renderer = _get_renderer()
+    if renderer is None:
+        h = getattr(grob, "height", None)
+        if h is not None and isinstance(h, Unit):
+            return h
+        return Unit(1, "npc")
+
+    gp = getattr(grob, "gp", None)
+    y_unit = getattr(grob, "y", None)
+    h_unit = getattr(grob, "height", None)
+    if y_unit is None or h_unit is None:
+        return Unit(0, "inches")
+
+    just = getattr(grob, "just", None) or "centre"
+    vjust_val = getattr(grob, "vjust", None)
+    vjust = resolve_vjust(just, vjust_val)
+
+    n = max(len(y_unit), len(h_unit))
+    ymin = float("inf")
+    ymax = float("-inf")
+    for i in range(n):
+        cy = renderer._resolve_to_inches_idx(y_unit, i % len(y_unit), "y", False, gp)
+        h = renderer._resolve_to_inches_idx(h_unit, i % len(h_unit), "y", True, gp)
+        bottom = cy - vjust * h
+        top = bottom + h
+        if bottom < ymin:
+            ymin = bottom
+        if top > ymax:
+            ymax = top
+
+    if ymin == float("inf"):
+        return Unit(0, "inches")
+    return Unit(ymax - ymin, "inches")
 
 
 # -- coordinate-based bounding box helpers ----------------------------------
@@ -304,47 +370,68 @@ def _get_renderer() -> Any:
     return state.get_renderer()
 
 
+def _locn_bounds_inches(
+    unit_obj: Any, renderer: Any, axis: str, gp: Any = None,
+) -> tuple:
+    """Resolve all elements of a Unit to inches and return (min, max).
+
+    Port of R ``C_locnBounds`` (grid.c:5296-5376): resolves each coordinate
+    to inches via ``transformXtoINCHES``/``transformYtoINCHES``, then computes
+    the bounding box.
+
+    Parameters
+    ----------
+    unit_obj : Unit
+        Coordinate unit.
+    renderer : object
+        Active renderer with ``_resolve_to_inches_idx``.
+    axis : str
+        ``"x"`` or ``"y"``.
+    gp : object, optional
+        Graphical parameters.
+
+    Returns
+    -------
+    tuple
+        ``(min_inches, max_inches)`` or ``(0.0, 0.0)`` if empty.
+    """
+    from ._units import Unit
+    if not isinstance(unit_obj, Unit) or len(unit_obj) == 0:
+        return (0.0, 0.0)
+
+    xmin = float("inf")
+    xmax = float("-inf")
+    n = len(unit_obj)
+    for i in range(n):
+        val = renderer._resolve_to_inches_idx(unit_obj, i, axis, False, gp)
+        if val < xmin:
+            xmin = val
+        if val > xmax:
+            xmax = val
+
+    if xmin == float("inf"):
+        return (0.0, 0.0)
+    return (xmin, xmax)
+
+
 def _locn_bounds_width(x_unit: Any, renderer: Any, gp: Any = None) -> float:
     """Compute the width (in inches) of a set of x-coordinates.
 
-    Mirrors R ``C_locnBounds`` returning ``bounds[3]`` (width).
+    Port of R ``C_locnBounds`` returning ``bounds[3]`` (width = xmax - xmin).
+    Uses the inches-based pipeline (not NPC).
     """
-    from ._units import Unit
-    if not isinstance(x_unit, Unit) or len(x_unit) == 0:
-        return 0.0
-
-    npc_vals = []
-    for i in range(len(x_unit)):
-        elem = Unit(x_unit._values[i], x_unit._units[i], data=x_unit._data[i])
-        npc_vals.append(renderer.resolve_to_npc(elem, axis="x", is_dim=False, gp=gp))
-
-    if not npc_vals:
-        return 0.0
-    npc_width = max(npc_vals) - min(npc_vals)
-    # Convert NPC width to inches
-    _x0, _y0, pw, _ph = renderer.get_viewport_bounds()
-    return npc_width * pw / renderer.dpi
+    lo, hi = _locn_bounds_inches(x_unit, renderer, "x", gp)
+    return hi - lo
 
 
 def _locn_bounds_height(y_unit: Any, renderer: Any, gp: Any = None) -> float:
     """Compute the height (in inches) of a set of y-coordinates.
 
-    Mirrors R ``C_locnBounds`` returning ``bounds[4]`` (height).
+    Port of R ``C_locnBounds`` returning ``bounds[4]`` (height = ymax - ymin).
+    Uses the inches-based pipeline (not NPC).
     """
-    from ._units import Unit
-    if not isinstance(y_unit, Unit) or len(y_unit) == 0:
-        return 0.0
-
-    npc_vals = []
-    for i in range(len(y_unit)):
-        elem = Unit(y_unit._values[i], y_unit._units[i], data=y_unit._data[i])
-        npc_vals.append(renderer.resolve_to_npc(elem, axis="y", is_dim=False, gp=gp))
-
-    if not npc_vals:
-        return 0.0
-    npc_height = max(npc_vals) - min(npc_vals)
-    _x0, _y0, _pw, ph = renderer.get_viewport_bounds()
-    return npc_height * ph / renderer.dpi
+    lo, hi = _locn_bounds_inches(y_unit, renderer, "y", gp)
+    return hi - lo
 
 
 # -- lines grob (R: primitives.R:186-200, uses C_locnBounds) ---------------
@@ -492,8 +579,8 @@ def _segments_height_details(grob: Any) -> Unit:
 def _circle_width_details(grob: Any) -> Unit:
     """Width of a circle grob: bounding box considering radius.
 
-    Mirrors ``widthDetails.circle`` (R ``primitives.R:1062``).
-    R's ``C_circleBounds`` computes ``(max(x+r) - min(x-r))``.
+    Port of R ``widthDetails.circle`` (primitives.R:1062).
+    R's ``C_circleBounds`` computes ``max(cx+r) - min(cx-r)`` in inches.
     """
     from ._units import Unit as _Unit
     renderer = _get_renderer()
@@ -507,38 +594,36 @@ def _circle_width_details(grob: Any) -> Unit:
     if x_unit is None or not isinstance(x_unit, _Unit):
         return Unit(0, "inches")
 
-    # Resolve each center and radius to NPC, then compute bounds
     n = len(x_unit)
-    r_npc_arr = []
-    if r_unit is not None and isinstance(r_unit, _Unit):
-        for i in range(len(r_unit)):
-            elem = _Unit(r_unit._values[i], r_unit._units[i], data=r_unit._data[i])
-            r_npc_arr.append(renderer.resolve_to_npc(elem, axis="x", is_dim=True, gp=gp))
-    if not r_npc_arr:
-        r_npc_arr = [0.0]
+    nr = len(r_unit) if r_unit is not None and isinstance(r_unit, _Unit) else 0
 
-    x_npc_arr = []
+    xmin = float("inf")
+    xmax = float("-inf")
     for i in range(n):
-        elem = _Unit(x_unit._values[i], x_unit._units[i], data=x_unit._data[i])
-        x_npc_arr.append(renderer.resolve_to_npc(elem, axis="x", is_dim=False, gp=gp))
+        cx = renderer._resolve_to_inches_idx(x_unit, i, "x", False, gp)
+        if nr > 0:
+            # R: r = pmin(convertWidth(r), convertHeight(r))
+            rw = renderer._resolve_to_inches_idx(r_unit, i % nr, "x", True, gp)
+            rh = renderer._resolve_to_inches_idx(r_unit, i % nr, "y", True, gp)
+            r = min(rw, rh)
+        else:
+            r = 0.0
+        left = cx - r
+        right = cx + r
+        if left < xmin:
+            xmin = left
+        if right > xmax:
+            xmax = right
 
-    # Compute bounding box with radius
-    max_vals = []
-    min_vals = []
-    for i in range(n):
-        r_npc = r_npc_arr[i % len(r_npc_arr)]
-        max_vals.append(x_npc_arr[i] + r_npc)
-        min_vals.append(x_npc_arr[i] - r_npc)
-
-    npc_width = max(max_vals) - min(min_vals)
-    _x0, _y0, vp_pw, _ph = renderer.get_viewport_bounds()
-    return Unit(npc_width * vp_pw / renderer.dpi, "inches")
+    if xmin == float("inf"):
+        return Unit(0, "inches")
+    return Unit(xmax - xmin, "inches")
 
 
 def _circle_height_details(grob: Any) -> Unit:
     """Height of a circle grob.
 
-    Mirrors ``heightDetails.circle`` (R ``primitives.R:1070``).
+    Port of R ``heightDetails.circle`` (primitives.R:1070).
     """
     from ._units import Unit as _Unit
     renderer = _get_renderer()
@@ -553,29 +638,28 @@ def _circle_height_details(grob: Any) -> Unit:
         return Unit(0, "inches")
 
     n = len(y_unit)
-    r_npc_arr = []
-    if r_unit is not None and isinstance(r_unit, _Unit):
-        for i in range(len(r_unit)):
-            elem = _Unit(r_unit._values[i], r_unit._units[i], data=r_unit._data[i])
-            r_npc_arr.append(renderer.resolve_to_npc(elem, axis="y", is_dim=True, gp=gp))
-    if not r_npc_arr:
-        r_npc_arr = [0.0]
+    nr = len(r_unit) if r_unit is not None and isinstance(r_unit, _Unit) else 0
 
-    y_npc_arr = []
+    ymin = float("inf")
+    ymax = float("-inf")
     for i in range(n):
-        elem = _Unit(y_unit._values[i], y_unit._units[i], data=y_unit._data[i])
-        y_npc_arr.append(renderer.resolve_to_npc(elem, axis="y", is_dim=False, gp=gp))
+        cy = renderer._resolve_to_inches_idx(y_unit, i, "y", False, gp)
+        if nr > 0:
+            rw = renderer._resolve_to_inches_idx(r_unit, i % nr, "x", True, gp)
+            rh = renderer._resolve_to_inches_idx(r_unit, i % nr, "y", True, gp)
+            r = min(rw, rh)
+        else:
+            r = 0.0
+        bottom = cy - r
+        top = cy + r
+        if bottom < ymin:
+            ymin = bottom
+        if top > ymax:
+            ymax = top
 
-    max_vals = []
-    min_vals = []
-    for i in range(n):
-        r_npc = r_npc_arr[i % len(r_npc_arr)]
-        max_vals.append(y_npc_arr[i] + r_npc)
-        min_vals.append(y_npc_arr[i] - r_npc)
-
-    npc_height = max(max_vals) - min(min_vals)
-    _x0, _y0, _pw, vp_ph = renderer.get_viewport_bounds()
-    return Unit(npc_height * vp_ph / renderer.dpi, "inches")
+    if ymin == float("inf"):
+        return Unit(0, "inches")
+    return Unit(ymax - ymin, "inches")
 
 
 # -- roundrect grob (same as rect: returns own width/height) ----------------
@@ -621,196 +705,117 @@ def _path_height_details(grob: Any) -> Unit:
 # -- rastergrob (returns own width/height, same as rect) --------------------
 
 def _raster_width_details(grob: Any) -> Unit:
-    """Width of a raster grob: its own *width* attribute.
+    """Width of a raster grob.
 
-    Mirrors ``widthDetails.rastergrob``.
+    Port of R ``widthDetails.rastergrob`` (primitives.R:1313) — uses
+    ``C_rectBounds`` after resolving raster size.  Same logic as rect.
     """
     return _rect_width_details(grob)
 
 
 def _raster_height_details(grob: Any) -> Unit:
-    """Height of a raster grob: its own *height* attribute."""
+    """Height of a raster grob.
+
+    Port of R ``heightDetails.rastergrob`` (primitives.R:1325).
+    """
     return _rect_height_details(grob)
 
 
 # -- xspline grob (R: primitives.R:845-861, uses C_xsplineBounds) ----------
 
 def _xspline_width_details(grob: Any) -> Unit:
-    """Width of an xspline grob: bounding box of evaluated spline points.
+    """Width of an xspline grob: bounding box of control points.
 
-    R calls ``C_xsplineBounds`` which evaluates the spline and computes
-    bounds.  We use ``xspline_points()`` for the same effect.
-
-    Mirrors ``widthDetails.xspline`` (R ``primitives.R:845``).
+    Port of R ``widthDetails.xspline`` (primitives.R:845) which uses
+    ``C_xsplineBounds``.  We approximate by using the control point
+    bounding box (same as C_locnBounds on the control points).
     """
-    try:
-        from ._curve import xspline_points
-        pts = xspline_points(grob)
-        if len(pts["x"]) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, vp_pw, _ = renderer.get_viewport_bounds()
-            npc_width = float(pts["x"].max() - pts["x"].min())
-            return Unit(npc_width * vp_pw / renderer.dpi, "inches")
-        return Unit(float(pts["x"].max() - pts["x"].min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    x_unit = getattr(grob, "x", None)
+    gp = getattr(grob, "gp", None)
+    return Unit(_locn_bounds_width(x_unit, renderer, gp), "inches")
 
 
 def _xspline_height_details(grob: Any) -> Unit:
     """Height of an xspline grob.
 
-    Mirrors ``heightDetails.xspline`` (R ``primitives.R:853``).
+    Port of R ``heightDetails.xspline`` (primitives.R:854).
     """
-    try:
-        from ._curve import xspline_points
-        pts = xspline_points(grob)
-        if len(pts["y"]) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, _, vp_ph = renderer.get_viewport_bounds()
-            npc_height = float(pts["y"].max() - pts["y"].min())
-            return Unit(npc_height * vp_ph / renderer.dpi, "inches")
-        return Unit(float(pts["y"].max() - pts["y"].min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    y_unit = getattr(grob, "y", None)
+    gp = getattr(grob, "gp", None)
+    return Unit(_locn_bounds_height(y_unit, renderer, gp), "inches")
 
 
 # -- bezier grob (R: primitives.R:997-1003, expands via splinegrob()) ------
 
 def _bezier_width_details(grob: Any) -> Unit:
-    """Width of a bezier grob: bounding box of evaluated Bezier points.
+    """Width of a bezier grob: bounding box of control points.
 
-    R's ``widthDetails.beziergrob`` calls ``splinegrob()`` to expand to
-    an xsplineGrob, then delegates.  We use ``bezier_points()`` directly.
-
-    Mirrors ``widthDetails.beziergrob`` (R ``primitives.R:997``).
+    Port of R ``widthDetails.beziergrob`` (primitives.R:997).
     """
-    try:
-        from ._curve import bezier_points
-        pts = bezier_points(grob)
-        if len(pts["x"]) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, vp_pw, _ = renderer.get_viewport_bounds()
-            npc_width = float(pts["x"].max() - pts["x"].min())
-            return Unit(npc_width * vp_pw / renderer.dpi, "inches")
-        return Unit(float(pts["x"].max() - pts["x"].min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    x_unit = getattr(grob, "x", None)
+    gp = getattr(grob, "gp", None)
+    return Unit(_locn_bounds_width(x_unit, renderer, gp), "inches")
 
 
 def _bezier_height_details(grob: Any) -> Unit:
     """Height of a bezier grob.
 
-    Mirrors ``heightDetails.beziergrob`` (R ``primitives.R:1001``).
+    Port of R ``heightDetails.beziergrob`` (primitives.R:1001).
     """
-    try:
-        from ._curve import bezier_points
-        pts = bezier_points(grob)
-        if len(pts["y"]) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, _, vp_ph = renderer.get_viewport_bounds()
-            npc_height = float(pts["y"].max() - pts["y"].min())
-            return Unit(npc_height * vp_ph / renderer.dpi, "inches")
-        return Unit(float(pts["y"].max() - pts["y"].min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    y_unit = getattr(grob, "y", None)
+    gp = getattr(grob, "gp", None)
+    return Unit(_locn_bounds_height(y_unit, renderer, gp), "inches")
 
 
 # -- curve grob (R: curve.R:481-495, expands via calcCurveGrob()) ----------
 
 def _curve_width_details(grob: Any) -> Unit:
-    """Width of a curve grob: expand to control points, compute bbox.
+    """Width of a curve grob.
 
-    R's ``widthDetails.curve`` calls ``calcCurveGrob()`` to build the
-    expanded gTree, then delegates to children's widthDetails.  We
-    compute the curve control points directly.
-
-    Mirrors ``widthDetails.curve`` (R ``curve.R:481``).
+    Port of R ``widthDetails.curve`` (curve.R:481).  R expands to a
+    child grob then delegates.  We use the endpoint bounding box.
     """
-    try:
-        from ._curve import _calc_curve_points
-        from ._units import Unit as _Unit
-        x1 = getattr(grob, "x1", None)
-        y1 = getattr(grob, "y1", None)
-        x2 = getattr(grob, "x2", None)
-        y2 = getattr(grob, "y2", None)
-        if x1 is None or x2 is None:
-            return Unit(0, "inches")
-        x1v = float(x1._values[0]) if isinstance(x1, _Unit) else float(x1)
-        y1v = float(y1._values[0]) if isinstance(y1, _Unit) else float(y1)
-        x2v = float(x2._values[0]) if isinstance(x2, _Unit) else float(x2)
-        y2v = float(y2._values[0]) if isinstance(y2, _Unit) else float(y2)
-
-        px, py = _calc_curve_points(
-            x1v, y1v, x2v, y2v,
-            curvature=float(getattr(grob, "curvature", 1.0)),
-            angle=float(getattr(grob, "angle", 90.0)),
-            ncp=int(getattr(grob, "ncp", 1)),
-            shape=float(getattr(grob, "shape", 0.5)),
-            square=bool(getattr(grob, "square", True)),
-            squareShape=float(getattr(grob, "squareShape", 1.0)),
-            inflect=bool(getattr(grob, "inflect", False)),
-            open_=bool(getattr(grob, "open_", getattr(grob, "open", True))),
-        )
-        if len(px) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, vp_pw, _ = renderer.get_viewport_bounds()
-            npc_width = float(px.max() - px.min())
-            return Unit(npc_width * vp_pw / renderer.dpi, "inches")
-        return Unit(float(px.max() - px.min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    from ._units import Unit as _Unit, unit_c
+    x1 = getattr(grob, "x1", None)
+    x2 = getattr(grob, "x2", None)
+    gp = getattr(grob, "gp", None)
+    if x1 is not None and x2 is not None and isinstance(x1, _Unit) and isinstance(x2, _Unit):
+        combined = unit_c(x1, x2)
+        return Unit(_locn_bounds_width(combined, renderer, gp), "inches")
+    return Unit(0, "inches")
 
 
 def _curve_height_details(grob: Any) -> Unit:
     """Height of a curve grob.
 
-    Mirrors ``heightDetails.curve`` (R ``curve.R:489``).
+    Port of R ``heightDetails.curve`` (curve.R:489).
     """
-    try:
-        from ._curve import _calc_curve_points
-        from ._units import Unit as _Unit
-        x1 = getattr(grob, "x1", None)
-        y1 = getattr(grob, "y1", None)
-        x2 = getattr(grob, "x2", None)
-        y2 = getattr(grob, "y2", None)
-        if y1 is None or y2 is None:
-            return Unit(0, "inches")
-        x1v = float(x1._values[0]) if isinstance(x1, _Unit) else float(x1)
-        y1v = float(y1._values[0]) if isinstance(y1, _Unit) else float(y1)
-        x2v = float(x2._values[0]) if isinstance(x2, _Unit) else float(x2)
-        y2v = float(y2._values[0]) if isinstance(y2, _Unit) else float(y2)
-
-        px, py = _calc_curve_points(
-            x1v, y1v, x2v, y2v,
-            curvature=float(getattr(grob, "curvature", 1.0)),
-            angle=float(getattr(grob, "angle", 90.0)),
-            ncp=int(getattr(grob, "ncp", 1)),
-            shape=float(getattr(grob, "shape", 0.5)),
-            square=bool(getattr(grob, "square", True)),
-            squareShape=float(getattr(grob, "squareShape", 1.0)),
-            inflect=bool(getattr(grob, "inflect", False)),
-            open_=bool(getattr(grob, "open_", getattr(grob, "open", True))),
-        )
-        if len(py) == 0:
-            return Unit(0, "inches")
-        renderer = _get_renderer()
-        if renderer is not None:
-            _, _, _, vp_ph = renderer.get_viewport_bounds()
-            npc_height = float(py.max() - py.min())
-            return Unit(npc_height * vp_ph / renderer.dpi, "inches")
-        return Unit(float(py.max() - py.min()), "npc")
-    except Exception:
+    renderer = _get_renderer()
+    if renderer is None:
         return Unit(0, "inches")
+    from ._units import Unit as _Unit, unit_c
+    y1 = getattr(grob, "y1", None)
+    y2 = getattr(grob, "y2", None)
+    gp = getattr(grob, "gp", None)
+    if y1 is not None and y2 is not None and isinstance(y1, _Unit) and isinstance(y2, _Unit):
+        combined = unit_c(y1, y2)
+        return Unit(_locn_bounds_height(combined, renderer, gp), "inches")
+    return Unit(0, "inches")
 
 
 # ---------------------------------------------------------------------------
@@ -1014,11 +1019,14 @@ def y_details(x: Any, theta: float = 0) -> Unit:
 
 
 def grob_width(x: Any) -> Unit:
-    """Create a ``"grobwidth"`` unit referencing grob *x*.
+    """Create a ``"grobwidth"`` unit referencing *x*.
+
+    Port of R ``grobWidth()`` (unit.R:674-692).
+    Accepts Grob, GList, GPath, or string (auto-wrapped in GPath).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object whose width is referenced.
 
     Returns
@@ -1034,15 +1042,27 @@ def grob_width(x: Any) -> Unit:
     >>> u._units[0]
     'grobwidth'
     """
-    return Unit(1, "grobwidth", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+
+    if isinstance(x, GList):
+        # R unit.R:682-684: rep_len(1, length(x)) with data=x
+        return Unit([1.0] * len(x), ["grobwidth"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(1, "grobwidth", data=x)
+    # Default: wrap string in GPath (R unit.R:690-692)
+    return Unit(1, "grobwidth", data=GPath(str(x)))
 
 
 def grob_height(x: Any) -> Unit:
-    """Create a ``"grobheight"`` unit referencing grob *x*.
+    """Create a ``"grobheight"`` unit referencing *x*.
+
+    Port of R ``grobHeight()`` (unit.R:695-713).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object whose height is referenced.
 
     Returns
@@ -1050,51 +1070,87 @@ def grob_height(x: Any) -> Unit:
     Unit
         A unit of type ``"grobheight"`` with *x* stored as auxiliary data.
     """
-    return Unit(1, "grobheight", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+
+    if isinstance(x, GList):
+        return Unit([1.0] * len(x), ["grobheight"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(1, "grobheight", data=x)
+    return Unit(1, "grobheight", data=GPath(str(x)))
 
 
-def grob_x(x: Any, theta: float = 0) -> Unit:
-    """Create a ``"grobx"`` unit referencing grob *x* at angle *theta*.
+def grob_x(x: Any, theta: Any = 0) -> Unit:
+    """Create a ``"grobx"`` unit referencing *x* at angle *theta*.
+
+    Port of R ``grobX()`` (unit.R:632-650).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object.
-    theta : float, optional
-        Angle in degrees (default ``0``).
+    theta : str or float
+        Angle in degrees or one of ``"east"``, ``"north"``, ``"west"``,
+        ``"south"``.  Normalised to [0, 360).
 
     Returns
     -------
     Unit
-        A unit of type ``"grobx"`` with ``(x, theta)`` stored as data.
+        A unit of type ``"grobx"``.
     """
-    return Unit(theta, "grobx", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+    from ._units import convert_theta
+
+    t = convert_theta(theta)
+    if isinstance(x, GList):
+        return Unit([t] * len(x), ["grobx"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(t, "grobx", data=x)
+    return Unit(t, "grobx", data=GPath(str(x)))
 
 
-def grob_y(x: Any, theta: float = 0) -> Unit:
-    """Create a ``"groby"`` unit referencing grob *x* at angle *theta*.
+def grob_y(x: Any, theta: Any = 0) -> Unit:
+    """Create a ``"groby"`` unit referencing *x* at angle *theta*.
+
+    Port of R ``grobY()`` (unit.R:653-671).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object.
-    theta : float, optional
-        Angle in degrees (default ``0``).
+    theta : str or float
+        Angle in degrees or one of ``"east"``, ``"north"``, ``"west"``,
+        ``"south"``.  Normalised to [0, 360).
 
     Returns
     -------
     Unit
-        A unit of type ``"groby"`` with ``(x, theta)`` stored as data.
+        A unit of type ``"groby"``.
     """
-    return Unit(theta, "groby", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+    from ._units import convert_theta
+
+    t = convert_theta(theta)
+    if isinstance(x, GList):
+        return Unit([t] * len(x), ["groby"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(t, "groby", data=x)
+    return Unit(t, "groby", data=GPath(str(x)))
 
 
 def grob_ascent(x: Any) -> Unit:
-    """Create a ``"grobascent"`` unit referencing grob *x*.
+    """Create a ``"grobascent"`` unit referencing *x*.
+
+    Port of R ``grobAscent()`` (unit.R:716+).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object whose text ascent is referenced.
 
     Returns
@@ -1102,15 +1158,25 @@ def grob_ascent(x: Any) -> Unit:
     Unit
         A unit of type ``"grobascent"`` with *x* stored as auxiliary data.
     """
-    return Unit(1, "grobascent", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+
+    if isinstance(x, GList):
+        return Unit([1.0] * len(x), ["grobascent"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(1, "grobascent", data=x)
+    return Unit(1, "grobascent", data=GPath(str(x)))
 
 
 def grob_descent(x: Any) -> Unit:
-    """Create a ``"grobdescent"`` unit referencing grob *x*.
+    """Create a ``"grobdescent"`` unit referencing *x*.
+
+    Port of R ``grobDescent()`` (unit.R:737+).
 
     Parameters
     ----------
-    x : Grob
+    x : Grob, GList, GPath, or str
         The graphical object whose text descent is referenced.
 
     Returns
@@ -1118,7 +1184,15 @@ def grob_descent(x: Any) -> Unit:
     Unit
         A unit of type ``"grobdescent"`` with *x* stored as auxiliary data.
     """
-    return Unit(1, "grobdescent", data=x)
+    from ._grob import Grob, GList
+    from ._path import GPath
+
+    if isinstance(x, GList):
+        return Unit([1.0] * len(x), ["grobdescent"] * len(x),
+                    data=[x[i] for i in range(len(x))])
+    if isinstance(x, (Grob, GPath)):
+        return Unit(1, "grobdescent", data=x)
+    return Unit(1, "grobdescent", data=GPath(str(x)))
 
 
 # ---------------------------------------------------------------------------
