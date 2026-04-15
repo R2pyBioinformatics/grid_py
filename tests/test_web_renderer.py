@@ -414,64 +414,71 @@ class TestWebRendererOutput:
 
 
 class TestWebRendererCoordinateAccuracy:
-    """Verify that WebRenderer produces the same coordinate transforms as CairoRenderer."""
+    """Verify that WebRenderer draw_* methods pass through device coordinates.
 
-    def test_rect_coordinates_match_cairo(self):
-        """draw_rect device coordinates must match CairoRenderer's _x/_y/_sx/_sy."""
-        from grid_py.renderer import CairoRenderer
+    draw_* methods receive device coordinates (already resolved by _draw.py).
+    They must record those values directly in the scene graph without
+    applying any additional transform.
+    """
 
-        for x, y, w, h in [(0.5, 0.5, 0.3, 0.2), (0.0, 0.0, 1.0, 1.0),
-                            (0.1, 0.9, 0.05, 0.05)]:
-            cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+    def test_rect_device_passthrough(self):
+        """draw_rect stores device coords directly (with hjust/vjust applied)."""
+        for x, y, w, h in [(350, 250, 200, 100), (0, 0, 700, 500),
+                            (100, 50, 30, 30)]:
             web_r = WebRenderer(width=7, height=5, dpi=150)
-            # Get device coords from both
-            cx = cairo_r._x(x - w * 0.5)
-            cy = cairo_r._y(y - h * 0.5 + h)
-            cw = cairo_r._sx(w)
-            ch = cairo_r._sy(h)
-
-            web_r.draw_rect(x, y, w, h)
-            node = web_r._scene_root.children[0]
-            d = node.to_dict()
-            assert abs(d["props"]["x"] - cx) < 1e-9, f"x mismatch for ({x},{y},{w},{h})"
-            assert abs(d["props"]["y"] - cy) < 1e-9, f"y mismatch for ({x},{y},{w},{h})"
-            assert abs(d["props"]["w"] - cw) < 1e-9, f"w mismatch for ({x},{y},{w},{h})"
-            assert abs(d["props"]["h"] - ch) < 1e-9, f"h mismatch for ({x},{y},{w},{h})"
+            web_r.draw_rect(x, y, w, h, hjust=0.5, vjust=0.5)
+            d = web_r._scene_root.children[0].to_dict()
+            # hjust=0.5, vjust=0.5 → x0 = x - w*0.5, y0 = y - h*0.5
+            assert abs(d["props"]["x"] - (x - w * 0.5)) < 1e-9
+            assert abs(d["props"]["y"] - (y - h * 0.5)) < 1e-9
+            assert abs(d["props"]["w"] - w) < 1e-9
+            assert abs(d["props"]["h"] - h) < 1e-9
             web_r.new_page()
 
-    def test_circle_coordinates_match_cairo(self):
-        from grid_py.renderer import CairoRenderer
-        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+    def test_circle_device_passthrough(self):
         web_r = WebRenderer(width=7, height=5, dpi=150)
-        cx = cairo_r._x(0.3)
-        cy = cairo_r._y(0.7)
-        cr = (cairo_r._sx(0.1) + cairo_r._sy(0.1)) / 2.0
-        web_r.draw_circle(0.3, 0.7, 0.1)
+        web_r.draw_circle(300.0, 200.0, 50.0)
         d = web_r._scene_root.children[0].to_dict()
-        assert abs(d["props"]["x"] - cx) < 1e-9
-        assert abs(d["props"]["y"] - cy) < 1e-9
-        assert abs(d["props"]["r"] - cr) < 1e-9
+        assert abs(d["props"]["x"] - 300.0) < 1e-9
+        assert abs(d["props"]["y"] - 200.0) < 1e-9
+        assert abs(d["props"]["r"] - 50.0) < 1e-9
 
-    def test_text_coordinates_match_cairo(self):
-        from grid_py.renderer import CairoRenderer
-        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+    def test_text_device_passthrough(self):
         web_r = WebRenderer(width=7, height=5, dpi=150)
-        web_r.draw_text(0.5, 0.9, "hello")
+        web_r.draw_text(350.0, 100.0, "hello")
         d = web_r._scene_root.children[0].to_dict()
-        assert abs(d["props"]["x"] - cairo_r._x(0.5)) < 1e-9
-        assert abs(d["props"]["y"] - cairo_r._y(0.9)) < 1e-9
+        assert abs(d["props"]["x"] - 350.0) < 1e-9
+        assert abs(d["props"]["y"] - 100.0) < 1e-9
 
-    def test_points_coordinates_match_cairo(self):
-        from grid_py.renderer import CairoRenderer
-        xs = np.array([0.1, 0.5, 0.9])
-        ys = np.array([0.2, 0.6, 0.8])
-        cairo_r = CairoRenderer(width=7, height=5, dpi=150)
+    def test_points_device_passthrough(self):
+        xs = np.array([100.0, 350.0, 600.0])
+        ys = np.array([50.0, 250.0, 450.0])
         web_r = WebRenderer(width=7, height=5, dpi=150)
         web_r.draw_points(xs, ys)
         d = web_r._scene_root.children[0].to_dict()
         for i in range(3):
-            assert abs(d["props"]["x"][i] - cairo_r._x(float(xs[i]))) < 1e-9
-            assert abs(d["props"]["y"][i] - cairo_r._y(float(ys[i]))) < 1e-9
+            assert abs(d["props"]["x"][i] - float(xs[i])) < 1e-9
+            assert abs(d["props"]["y"][i] - float(ys[i])) < 1e-9
+
+    def test_end_to_end_rect_matches_cairo(self):
+        """Full pipeline: grid_draw(rect_grob) produces same device coords for both renderers."""
+        from grid_py import CairoRenderer, get_state, grid_draw, rect_grob, Gpar
+
+        cairo_r = CairoRenderer(width=7, height=5, dpi=100)
+        get_state().init_device(cairo_r)
+        grid_draw(rect_grob(x=0.5, y=0.5, width=0.8, height=0.6,
+                             gp=Gpar(fill='red')))
+
+        web_r = WebRenderer(width=7, height=5, dpi=100)
+        get_state().init_device(web_r)
+        grid_draw(rect_grob(x=0.5, y=0.5, width=0.8, height=0.6,
+                             gp=Gpar(fill='red')))
+
+        d = web_r._scene_root.children[0].to_dict()
+        # Both renderers should place the rect at the same device position
+        # 0.8 npc wide on 700px = 560px; 0.6 npc tall on 500px = 300px
+        assert abs(d["props"]["w"] - 560.0) < 1.0
+        assert abs(d["props"]["h"] - 300.0) < 1.0
 
 
 class TestWebRendererVectorizedGpar:

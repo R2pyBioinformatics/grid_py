@@ -144,7 +144,7 @@ _HTML_TEMPLATE = """\
 </head>
 <body>
 <div id="gridpy-plot"></div>
-<script src="{d3_src}"></script>
+{d3_block}
 <script>
 {runtime_js}
 </script>
@@ -357,19 +357,20 @@ class WebRenderer(GridRenderer):
         else:
             self._current_parent.children.append(node)
 
+    # All draw_* methods receive device coordinates (pixels) from _draw.py.
+    # CairoRenderer uses top-left origin with y increasing downward —
+    # resolve_y() already applies the Y-flip, so coordinates are in
+    # the same space as SVG (top-left origin).  No further transform needed.
+
     def draw_rect(self, x: float, y: float, w: float, h: float,
                   hjust: float = 0.5, vjust: float = 0.5,
                   gp: Optional[Any] = None) -> None:
         x0 = x - w * hjust
-        y0 = y - h * vjust
-        dx = self._x(x0)
-        dy = self._y(y0 + h)
-        dw = self._sx(w)
-        dh = self._sy(h)
+        y0 = y - h * (1.0 - vjust)
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="rect",
-            props={"x": dx, "y": dy, "w": dw, "h": dh},
+            props={"x": x0, "y": y0, "w": w, "h": h},
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
         )
@@ -377,13 +378,10 @@ class WebRenderer(GridRenderer):
 
     def draw_circle(self, x: float, y: float, r: float,
                     gp: Optional[Any] = None) -> None:
-        cx = self._x(x)
-        cy = self._y(y)
-        dr = (self._sx(r) + self._sy(r)) / 2.0
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="circle",
-            props={"x": cx, "y": cy, "r": dr},
+            props={"x": x, "y": y, "r": r},
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
         )
@@ -398,12 +396,10 @@ class WebRenderer(GridRenderer):
             x = np.resize(x, n)
         if len(y) < n:
             y = np.resize(y, n)
-        dx = [self._x(float(v)) for v in x]
-        dy = [self._y(float(v)) for v in y]
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="polyline",
-            props={"x": dx, "y": dy},
+            props={"x": [float(v) for v in x], "y": [float(v) for v in y]},
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
         )
@@ -423,8 +419,8 @@ class WebRenderer(GridRenderer):
             if len(px) < 2:
                 continue
             groups.append({
-                "x": [self._x(float(v)) for v in px],
-                "y": [self._y(float(v)) for v in py],
+                "x": [float(v) for v in px],
+                "y": [float(v) for v in py],
             })
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
@@ -443,10 +439,10 @@ class WebRenderer(GridRenderer):
             node_id=self._id_gen.next("grob"),
             node_type="segments",
             props={
-                "x0": [self._x(float(x0[i])) for i in range(n)],
-                "y0": [self._y(float(y0[i])) for i in range(n)],
-                "x1": [self._x(float(x1[i])) for i in range(n)],
-                "y1": [self._y(float(y1[i])) for i in range(n)],
+                "x0": [float(x0[i]) for i in range(n)],
+                "y0": [float(y0[i]) for i in range(n)],
+                "x1": [float(x1[i]) for i in range(n)],
+                "y1": [float(y1[i]) for i in range(n)],
             },
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
@@ -457,12 +453,10 @@ class WebRenderer(GridRenderer):
                      gp: Optional[Any] = None) -> None:
         if len(x) < 3:
             return
-        dx = [self._x(float(v)) for v in x]
-        dy = [self._y(float(v)) for v in y]
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="polygon",
-            props={"x": dx, "y": dy},
+            props={"x": [float(v) for v in x], "y": [float(v) for v in y]},
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
         )
@@ -479,8 +473,8 @@ class WebRenderer(GridRenderer):
             if len(px) < 2:
                 continue
             groups.append({
-                "x": [self._x(float(v)) for v in px],
-                "y": [self._y(float(v)) for v in py],
+                "x": [float(v) for v in px],
+                "y": [float(v) for v in py],
             })
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
@@ -498,7 +492,7 @@ class WebRenderer(GridRenderer):
             node_id=self._id_gen.next("grob"),
             node_type="text",
             props={
-                "x": self._x(x), "y": self._y(y),
+                "x": x, "y": y,
                 "label": str(label),
                 "rot": rot, "hjust": hjust, "vjust": vjust,
             },
@@ -510,13 +504,11 @@ class WebRenderer(GridRenderer):
     def draw_points(self, x: "np.ndarray", y: "np.ndarray",
                     size: float = 1.0, pch: Any = 19,
                     gp: Optional[Any] = None) -> None:
-        dx = [self._x(float(v)) for v in x]
-        dy = [self._y(float(v)) for v in y]
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="points",
             props={
-                "x": dx, "y": dy,
+                "x": [float(v) for v in x], "y": [float(v) for v in y],
                 "size": float(size),
                 "pch": int(pch) if not isinstance(pch, (list, tuple, np.ndarray)) else [int(p) for p in pch],
             },
@@ -532,8 +524,8 @@ class WebRenderer(GridRenderer):
             node_id=self._id_gen.next("grob"),
             node_type="raster",
             props={
-                "x": self._x(x), "y": self._y(y + h),
-                "w": self._sx(w), "h": self._sy(h),
+                "x": x, "y": y,
+                "w": w, "h": h,
                 "src": data_uri,
                 "interpolate": interpolate,
             },
@@ -546,16 +538,12 @@ class WebRenderer(GridRenderer):
                        r: float = 0.0, hjust: float = 0.5, vjust: float = 0.5,
                        gp: Optional[Any] = None) -> None:
         x0 = x - w * hjust
-        y0 = y - h * vjust
-        dx = self._x(x0)
-        dy = self._y(y0 + h)
-        dw = self._sx(w)
-        dh = self._sy(h)
-        dr = min(self._sx(r), dw / 2, dh / 2) if r > 0 else 0.0
+        y0 = y - h * (1.0 - vjust)
+        dr = min(r, w / 2, h / 2) if r > 0 else 0.0
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="roundrect",
-            props={"x": dx, "y": dy, "w": dw, "h": dh, "r": dr},
+            props={"x": x0, "y": y0, "w": w, "h": h, "r": dr},
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
         )
@@ -573,8 +561,8 @@ class WebRenderer(GridRenderer):
             node_id=self._id_gen.next("grob"),
             node_type="polyline",
             props={
-                "x": [self._x(x0), self._x(x)],
-                "y": [self._y(y0), self._y(y)],
+                "x": [x0, x],
+                "y": [y0, y],
             },
             gpar=_serialise_gpar(gp, self._defs, self._id_gen),
             render_hint=self._default_hint,
@@ -589,10 +577,10 @@ class WebRenderer(GridRenderer):
 
     def push_clip(self, x0: float, y0: float, x1: float, y1: float) -> None:
         clip_id = self._id_gen.next("clip")
-        dx0 = self._x(min(x0, x1))
-        dy0 = self._y(max(y0, y1))
-        dw = self._sx(abs(x1 - x0))
-        dh = self._sy(abs(y1 - y0))
+        dx0 = min(x0, x1)
+        dy0 = min(y0, y1)
+        dw = abs(x1 - x0)
+        dh = abs(y1 - y0)
         self._defs.clip_paths.append({
             "id": clip_id, "x": dx0, "y": dy0, "w": dw, "h": dh,
         })
@@ -670,15 +658,32 @@ class WebRenderer(GridRenderer):
         """Return the scene graph as a JSON string."""
         return json.dumps(self.to_scene_dict(), indent=indent)
 
-    def to_html(self, interactive: bool = True, cdn: bool = True) -> str:
-        """Generate a self-contained HTML file."""
+    def to_html(self, interactive: bool = True, cdn: bool = True,
+                inline_d3: bool = False) -> str:
+        """Generate a self-contained HTML file.
+
+        Parameters
+        ----------
+        interactive : bool
+            Enable D3 interactions (zoom, pan, tooltip).
+        cdn : bool
+            Load D3 from CDN (for ``save()``).  Ignored when *inline_d3* is True.
+        inline_d3 : bool
+            Embed D3 source directly in the HTML.  Use this when the output
+            must work without network access (e.g. Jupyter iframe).
+        """
         scene_json = self.to_scene_json()
         css = _load_resource("gridpy.css")
         runtime_js = _load_resource("gridpy.js")
-        d3_src = _D3_CDN_URL if cdn else ""
+        if inline_d3:
+            d3_block = "<script>" + _load_resource("d3.v7.min.js") + "</script>"
+        elif cdn:
+            d3_block = f'<script src="{_D3_CDN_URL}"></script>'
+        else:
+            d3_block = ""
         return _HTML_TEMPLATE.format(
             css=css,
-            d3_src=d3_src,
+            d3_block=d3_block,
             runtime_js=runtime_js,
             scene_json=scene_json,
             interactive="true" if interactive else "false",
@@ -686,8 +691,23 @@ class WebRenderer(GridRenderer):
         )
 
     def _repr_html_(self) -> str:
-        """Jupyter notebook display integration."""
-        return self.to_html(interactive=True, cdn=True)
+        """Jupyter notebook display integration.
+
+        Uses an ``<iframe srcdoc="...">`` so that the embedded ``<script>``
+        tags execute normally (``innerHTML`` injection silently drops them).
+        D3 is inlined to avoid CSP / sandbox restrictions on external scripts.
+        """
+        full_html = self.to_html(interactive=True, inline_d3=True)
+        # Escape for embedding inside the srcdoc="..." attribute
+        escaped = full_html.replace("&", "&amp;").replace('"', "&quot;")
+        w = int(self.width_in * self.dpi)
+        h = int(self.height_in * self.dpi)
+        return (
+            f'<iframe srcdoc="{escaped}" '
+            f'width="{w}" height="{h}" '
+            f'style="border:none;" '
+            f'sandbox="allow-scripts"></iframe>'
+        )
 
     def save(self, filename: str) -> None:
         """Save to an HTML file."""
