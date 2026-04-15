@@ -972,33 +972,75 @@ class CairoRenderer(GridRenderer):
         gp: Optional[Gpar] = None,
     ) -> None:
         ctx = self._ctx
-        ctx.save()
+        label_str = str(label)
 
-        self._set_font(gp)
-        stroke = self._apply_stroke(gp)
+        # R's grid.text splits on \n and draws each line separately
+        # with line spacing = 1.2 * font height (R grDevices default).
+        lines = label_str.split("\n") if "\n" in label_str else None
 
-        ext = ctx.text_extents(str(label))
-        tw = ext.width
-        th = ext.height
+        if lines is None:
+            # Single-line fast path (original logic)
+            ctx.save()
+            self._set_font(gp)
+            self._apply_stroke(gp)
 
-        # x, y are already in device coords
-        off_x = -tw * hjust
-        off_y = th * vjust
+            ext = ctx.text_extents(label_str)
+            tw = ext.width
+            th = ext.height
 
-        if rot != 0.0:
-            ctx.translate(x, y)
-            ctx.rotate(-math.radians(rot))  # negative: grid uses CCW
-            ctx.move_to(off_x, off_y)
+            off_x = -tw * hjust
+            off_y = th * vjust
+
+            if rot != 0.0:
+                ctx.translate(x, y)
+                ctx.rotate(-math.radians(rot))
+                ctx.move_to(off_x, off_y)
+            else:
+                ctx.move_to(x + off_x, y + off_y)
+
+            if self._path_collecting:
+                ctx.text_path(label_str)
+            else:
+                ctx.show_text(label_str)
+            ctx.restore()
         else:
-            ctx.move_to(x + off_x, y + off_y)
+            # Multi-line: split on \n, draw each line with line spacing.
+            # R uses lineheight * fontsize as inter-line distance.
+            ctx.save()
+            self._set_font(gp)
+            self._apply_stroke(gp)
 
-        if self._path_collecting:
-            # Build text outline path without rendering pixels
-            # (mirrors R's use of cairo_text_path in C_stroke/C_fill)
-            ctx.text_path(str(label))
-        else:
-            ctx.show_text(str(label))
-        ctx.restore()
+            # Measure each line and compute total block size
+            line_extents = [ctx.text_extents(ln) for ln in lines]
+            single_h = ctx.text_extents("Mg").height  # reference height
+            line_spacing = single_h * 1.2  # R default lineheight = 1.2
+            n_lines = len(lines)
+
+            max_tw = max((e.width for e in line_extents), default=0)
+            total_h = single_h + line_spacing * (n_lines - 1)
+
+            # Block offset so that (hjust, vjust) refer to the whole block
+            block_off_x = -max_tw * hjust
+            block_off_y = -total_h * (1 - vjust) + single_h
+
+            if rot != 0.0:
+                ctx.translate(x, y)
+                ctx.rotate(-math.radians(rot))
+            else:
+                ctx.translate(x, y)
+
+            for k, ln in enumerate(lines):
+                lw = line_extents[k].width
+                # Per-line horizontal alignment within the block
+                lx = block_off_x + (max_tw - lw) * hjust
+                ly = block_off_y + k * line_spacing
+                ctx.move_to(lx, ly)
+                if self._path_collecting:
+                    ctx.text_path(ln)
+                else:
+                    ctx.show_text(ln)
+
+            ctx.restore()
 
     # ------------------------------------------------------------------ #
     #  pch shape path helpers (R pch 0-25)                                #
