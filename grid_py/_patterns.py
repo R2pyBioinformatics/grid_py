@@ -37,9 +37,17 @@ __all__: List[str] = [
     "LinearGradient",
     "RadialGradient",
     "Pattern",
+    "ResolvedPattern",
     "linear_gradient",
     "radial_gradient",
     "pattern",
+    "is_pattern",
+    "is_pattern_list",
+    "is_resolved_pattern",
+    "resolve_fill",
+    "resolve_pattern",
+    "record_grob_for_pattern_resolution",
+    "record_gtree_for_pattern_resolution",
 ]
 
 # Valid *extend* modes, matching R's ``match.arg`` choices.
@@ -696,3 +704,346 @@ def pattern(
         extend=extend,
         group=group,
     )
+
+
+# ============================================================================
+# Pattern resolution pipeline
+# Port of R patterns.R:140-429
+# ============================================================================
+
+
+def is_pattern(fill: Any) -> bool:
+    """Test whether *fill* is a grid pattern (gradient or tiling).
+
+    Mirrors R ``is.pattern()``.
+    """
+    return isinstance(fill, (LinearGradient, RadialGradient, Pattern))
+
+
+def is_pattern_list(fill: Any) -> bool:
+    """Test whether *fill* is a list of patterns."""
+    if isinstance(fill, (list, tuple)):
+        return len(fill) > 0 and all(is_pattern(f) for f in fill)
+    return False
+
+
+def is_resolved_pattern(fill: Any) -> bool:
+    """Test whether a pattern has already been resolved."""
+    return isinstance(fill, dict) and fill.get("_resolved", False)
+
+
+class ResolvedPattern:
+    """A pattern that has been resolved to renderer-specific form.
+
+    Port of R ``resolvedPattern()`` (patterns.R:192-196).
+    Wraps the original pattern with a ``ref`` (renderer handle) and
+    marks it as resolved.
+    """
+
+    def __init__(self, pattern: Any, ref: Any) -> None:
+        self.pattern = pattern
+        self.ref = ref
+        self._resolved = True
+
+    def __repr__(self) -> str:
+        return f"ResolvedPattern(ref={self.ref!r})"
+
+
+# ---------------------------------------------------------------------------
+# resolveFill -- S3-like dispatcher
+# Port of R patterns.R:198-385
+# ---------------------------------------------------------------------------
+
+
+def resolve_fill(fill: Any, index: int = 1, grob: Any = None) -> Any:
+    """Resolve a fill value to a renderer-ready form.
+
+    Port of R ``resolveFill()`` (patterns.R:198-385).
+    Dispatches based on fill type:
+    - Simple colour strings pass through unchanged
+    - Already-resolved patterns pass through
+    - Unresolved patterns → resolvePattern()
+    - Pattern lists → resolve each element
+
+    Parameters
+    ----------
+    fill : Any
+        Fill value from gpar. May be a string, LinearGradient,
+        RadialGradient, Pattern, ResolvedPattern, list, etc.
+    index : int
+        Shape index (1-based, for per-shape pattern lists).
+    grob : Grob or None
+        The grob being filled (attached for coordinate queries).
+
+    Returns
+    -------
+    Any
+        Resolved fill value (string, ResolvedPattern, or "transparent").
+    """
+    # Already resolved (R patterns.R:210-212)
+    if isinstance(fill, ResolvedPattern):
+        return fill
+
+    # Simple fill (R patterns.R:205-207)
+    if not is_pattern(fill) and not is_pattern_list(fill):
+        return fill
+
+    # Single pattern (R patterns.R:217-280)
+    if is_pattern(fill):
+        return _resolve_fill_pattern(fill, index, grob)
+
+    # Pattern list (R patterns.R:222-334)
+    if is_pattern_list(fill):
+        return _resolve_fill_pattern_list(fill, grob)
+
+    return fill
+
+
+def _resolve_fill_pattern(fill: Any, index: int, grob: Any) -> Any:
+    """Resolve a single pattern fill.
+
+    Port of R ``resolveFill.GridGrobPattern`` (patterns.R:237-280).
+    """
+    from ._coords import grob_points, is_empty_coords, coords_bbox
+    from ._viewport import Viewport, push_viewport, pop_viewport
+    from ._gpar import Gpar
+
+    # If grob is available, compute bounding box
+    if grob is not None:
+        pts = grob_points(grob, closed=True)
+        if not is_empty_coords(pts):
+            if getattr(fill, "group", True) or len(pts) <= 1:
+                bbox = coords_bbox(pts)
+            else:
+                # Per-shape bounding box
+                idx = (index - 1) % len(pts)
+                bbox = coords_bbox(pts[idx] if hasattr(pts, '__getitem__') else pts)
+
+            # Push temporary viewport for pattern resolution
+            # (R patterns.R:266-271)
+            vp = Viewport(
+                x=bbox["left"], y=bbox["bottom"],
+                width=bbox["width"], height=bbox["height"],
+                default_units="inches",
+                just=("left", "bottom"),
+                clip="off", mask="none",
+            )
+            push_viewport(vp, recording=False)
+            result = resolve_pattern(fill)
+            pop_viewport(recording=False)
+            return result
+        else:
+            import warnings
+            warnings.warn("Pattern fill applied to object with no inside")
+            return "transparent"
+
+    # No grob context — resolve in current viewport
+    return resolve_pattern(fill)
+
+
+def _resolve_fill_pattern_list(fill: list, grob: Any) -> Any:
+    """Resolve a list of patterns.
+
+    Port of R ``resolveFill.GridGrobPatternList`` (patterns.R:283-334).
+    """
+    resolved = []
+    for i, f in enumerate(fill):
+        if isinstance(f, ResolvedPattern):
+            resolved.append(f)
+        elif is_pattern(f):
+            resolved.append(_resolve_fill_pattern(f, i + 1, grob))
+        else:
+            resolved.append(f)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# resolvePattern -- type-specific resolution
+# Port of R patterns.R:387-429
+# ---------------------------------------------------------------------------
+
+
+def resolve_pattern(pattern: Any) -> Any:
+    """Resolve a pattern object to renderer-specific form.
+
+    Port of R ``resolvePattern()`` (patterns.R:387-429).
+    Dispatches based on pattern type: LinearGradient, RadialGradient,
+    or Pattern (tiling).
+
+    The resolved pattern contains a renderer-specific ``ref`` that can
+    be used directly by the rendering backend.
+
+    Parameters
+    ----------
+    pattern : LinearGradient or RadialGradient or Pattern
+        The pattern to resolve.
+
+    Returns
+    -------
+    ResolvedPattern
+        The pattern with renderer-specific reference attached.
+    """
+    if isinstance(pattern, LinearGradient):
+        return _resolve_linear_gradient(pattern)
+    elif isinstance(pattern, RadialGradient):
+        return _resolve_radial_gradient(pattern)
+    elif isinstance(pattern, Pattern):
+        return _resolve_tiling_pattern(pattern)
+    return pattern
+
+
+def _resolve_linear_gradient(grad: LinearGradient) -> ResolvedPattern:
+    """Resolve a linear gradient to renderer-specific form.
+
+    Port of R ``resolvePattern.GridLinearGradient`` (patterns.R:391-399).
+    Converts endpoints to device coordinates, creates a renderer pattern.
+    """
+    # The renderer will handle the actual gradient creation when it
+    # encounters this object in gpar$fill.  We store the resolved
+    # coordinates for the renderer to use.
+    from ._units import device_loc
+
+    try:
+        p1 = device_loc(grad.x1, grad.y1, value_only=True, device=True)
+        p2 = device_loc(grad.x2, grad.y2, value_only=True, device=True)
+        ref = {
+            "type": "linear_gradient",
+            "x1": float(p1["x"][0]), "y1": float(p1["y"][0]),
+            "x2": float(p2["x"][0]), "y2": float(p2["y"][0]),
+            "colours": grad.colours,
+            "stops": grad.stops,
+            "extend": grad.extend,
+        }
+    except Exception:
+        # Fallback: store the original gradient for later resolution
+        ref = {"type": "linear_gradient", "pattern": grad}
+
+    return ResolvedPattern(grad, ref)
+
+
+def _resolve_radial_gradient(grad: RadialGradient) -> ResolvedPattern:
+    """Resolve a radial gradient to renderer-specific form.
+
+    Port of R ``resolvePattern.GridRadialGradient`` (patterns.R:401-418).
+    """
+    from ._units import device_loc, device_dim, Unit
+    import math
+
+    try:
+        c1 = device_loc(grad.cx1, grad.cy1, value_only=True, device=True)
+        c2 = device_loc(grad.cx2, grad.cy2, value_only=True, device=True)
+        # R computes r as min of two axis scalings (patterns.R:403-411)
+        dim1a = device_dim(Unit(0, "inches"), grad.r1, value_only=True, device=True)
+        dim1b = device_dim(grad.r1, Unit(0, "inches"), value_only=True, device=True)
+        r1 = min(math.sqrt(dim1a["w"][0]**2 + dim1a["h"][0]**2),
+                 math.sqrt(dim1b["w"][0]**2 + dim1b["h"][0]**2))
+        dim2a = device_dim(Unit(0, "inches"), grad.r2, value_only=True, device=True)
+        dim2b = device_dim(grad.r2, Unit(0, "inches"), value_only=True, device=True)
+        r2 = min(math.sqrt(dim2a["w"][0]**2 + dim2a["h"][0]**2),
+                 math.sqrt(dim2b["w"][0]**2 + dim2b["h"][0]**2))
+        ref = {
+            "type": "radial_gradient",
+            "cx1": float(c1["x"][0]), "cy1": float(c1["y"][0]), "r1": r1,
+            "cx2": float(c2["x"][0]), "cy2": float(c2["y"][0]), "r2": r2,
+            "colours": grad.colours,
+            "stops": grad.stops,
+            "extend": grad.extend,
+        }
+    except Exception:
+        ref = {"type": "radial_gradient", "pattern": grad}
+
+    return ResolvedPattern(grad, ref)
+
+
+def _resolve_tiling_pattern(pat: Pattern) -> ResolvedPattern:
+    """Resolve a tiling pattern to renderer-specific form.
+
+    Port of R ``resolvePattern.GridTilingPattern`` (patterns.R:420-429).
+    """
+    from ._units import device_loc, device_dim
+
+    try:
+        xy = device_loc(pat.x, pat.y, value_only=True, device=True)
+        wh = device_dim(pat.width, pat.height, value_only=True, device=True)
+        left = float(xy["x"][0]) - pat.hjust * float(wh["w"][0])
+        bottom = float(xy["y"][0]) - pat.vjust * float(wh["h"][0])
+        ref = {
+            "type": "tiling_pattern",
+            "grob": pat.grob,
+            "x": left, "y": bottom,
+            "width": float(wh["w"][0]), "height": float(wh["h"][0]),
+            "extend": pat.extend,
+        }
+    except Exception:
+        ref = {"type": "tiling_pattern", "pattern": pat}
+
+    return ResolvedPattern(pat, ref)
+
+
+# ---------------------------------------------------------------------------
+# recordGrobForPatternResolution / recordGTreeForPatternResolution
+# Port of R patterns.R:150-190
+# ---------------------------------------------------------------------------
+
+
+def record_grob_for_pattern_resolution(grob: Any) -> None:
+    """Attach the built grob to gpar$fill for pattern resolution.
+
+    Port of R ``recordGrobForPatternResolution`` (patterns.R:150-161).
+    Called after ``makeContent()`` in the drawing pipeline.
+    If the current gpar has a pattern fill, the grob is attached so
+    that subsequent ``resolveFill()`` can compute the bounding box.
+    """
+    from ._state import get_state
+
+    state = get_state()
+    gp = state.get_gpar()
+    if gp is None:
+        return
+
+    fill = gp.get("fill", None)
+    if fill is None:
+        return
+
+    if is_pattern(fill):
+        # Attach grob to the pattern for later resolution
+        fill._attached_grob = grob
+    elif is_pattern_list(fill):
+        for f in fill:
+            if is_pattern(f):
+                f._attached_grob = grob
+
+
+def record_gtree_for_pattern_resolution(grob: Any) -> None:
+    """Resolve gTree-level pattern fill immediately.
+
+    Port of R ``recordGTreeForPatternResolution`` (patterns.R:176-190).
+    If the gTree's own gp$fill is a pattern with group=TRUE,
+    resolve it now (using the gTree's bounding box).
+    """
+    from ._state import get_state
+
+    gp = getattr(grob, "gp", None)
+    if gp is None:
+        return
+
+    fill = gp.get("fill", None) if hasattr(gp, "get") else None
+    if fill is None:
+        return
+
+    should_resolve = False
+    if is_pattern(fill) and getattr(fill, "group", False):
+        should_resolve = True
+    elif is_pattern_list(fill):
+        should_resolve = True
+
+    if should_resolve:
+        state = get_state()
+        current_gp = state.get_gpar()
+        current_fill = current_gp.get("fill", None) if current_gp else None
+        if current_fill is not None and (is_pattern(current_fill) or is_pattern_list(current_fill)):
+            resolved = resolve_fill(current_fill, grob=grob)
+            if resolved is None:
+                current_gp._params["fill"] = "transparent"
+            else:
+                current_gp._params["fill"] = resolved

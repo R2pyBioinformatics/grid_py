@@ -268,17 +268,65 @@ def _render_grob(
             renderer.draw_polygon(px, py, gp=gp)
 
     # ---- text ------------------------------------------------------------
+    # Port of R grid.c:3629-3860 gridText():
+    #   nx = max(length(x), length(y))
+    #   for i in 0..nx-1:
+    #     GEText(xx[i], yy[i], txt[i % ntxt], hjust[i%nh], vjust[i%nv], rot[i%nr])
     elif cls == "text":
+        label_raw = getattr(grob, "label", "")
+        x_unit = getattr(grob, "x", 0.5)
+        y_unit = getattr(grob, "y", 0.5)
+        rot_raw = getattr(grob, "rot", 0.0)
         hj, vj = _resolve_just(grob)
-        renderer.draw_text(
-            x=renderer.resolve_x(getattr(grob, "x", 0.5), gp=gp),
-            y=renderer.resolve_y(getattr(grob, "y", 0.5), gp=gp),
-            label=getattr(grob, "label", ""),
-            rot=float(getattr(grob, "rot", 0.0)),
-            hjust=hj,
-            vjust=vj,
-            gp=gp,
-        )
+
+        # Normalise label to a list
+        if isinstance(label_raw, str):
+            labels = [label_raw]
+        elif isinstance(label_raw, (list, tuple, np.ndarray)):
+            labels = [str(l) for l in label_raw]
+        else:
+            labels = [str(label_raw)]
+
+        # Resolve x/y to arrays
+        xx = renderer.resolve_x_array(x_unit, gp=gp)
+        yy = renderer.resolve_y_array(y_unit, gp=gp)
+
+        # Normalise rot to array
+        if isinstance(rot_raw, (list, tuple, np.ndarray)):
+            rots = np.atleast_1d(np.asarray(rot_raw, dtype=float))
+        else:
+            rots = np.array([float(rot_raw)])
+
+        # Normalise hjust/vjust to arrays
+        hjust_raw = getattr(grob, "hjust", None)
+        vjust_raw = getattr(grob, "vjust", None)
+        if isinstance(hj, (list, tuple, np.ndarray)):
+            hjs = np.atleast_1d(np.asarray(hj, dtype=float))
+        else:
+            hjs = np.array([float(hj)])
+        if isinstance(vj, (list, tuple, np.ndarray)):
+            vjs = np.atleast_1d(np.asarray(vj, dtype=float))
+        else:
+            vjs = np.array([float(vj)])
+
+        # R: nx = max(length(x), length(y))
+        nx = max(len(xx), len(yy))
+        ntxt = len(labels)
+        nrot = len(rots)
+        nhj = len(hjs)
+        nvj = len(vjs)
+
+        for i in range(nx):
+            gp_i = _subset_gpar(gp, i) if gp else gp
+            renderer.draw_text(
+                x=xx[i % len(xx)],
+                y=yy[i % len(yy)],
+                label=labels[i % ntxt],
+                rot=float(rots[i % nrot]),
+                hjust=float(hjs[i % nhj]),
+                vjust=float(vjs[i % nvj]),
+                gp=gp_i,
+            )
 
     # ---- points ----------------------------------------------------------
     elif cls == "points":
@@ -514,8 +562,13 @@ def _draw_grob(x: Grob) -> None:
         _push_vp_gp(x)
         x.pre_draw_details()
 
-        # makeContent -> drawDetails
+        # makeContent -> pattern resolution -> drawDetails
         x = x.make_content()
+
+        # Port of R grob.R:1843 recordGrobForPatternResolution(x)
+        from ._patterns import record_grob_for_pattern_resolution
+        record_grob_for_pattern_resolution(x)
+
         x.draw_details(recording=False)
 
         # Render via backend
@@ -578,8 +631,13 @@ def _draw_gtree(x: GTree) -> None:
 
         x.pre_draw_details()
 
-        # makeContent -> drawDetails
+        # makeContent -> pattern resolution -> drawDetails
         x = x.make_content()
+
+        # Port of R grob.R:1913 recordGTreeForPatternResolution(x)
+        from ._patterns import record_gtree_for_pattern_resolution
+        record_gtree_for_pattern_resolution(x)
+
         x.draw_details(recording=False)
 
         # Render the gTree itself (in case it has direct content)
