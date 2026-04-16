@@ -352,7 +352,24 @@ class CairoRenderer(GridRenderer):
         # R semantics: lwd=0 means invisible line
         if lw <= 0:
             return (0.0, 0.0, 0.0, 0.0)
-        ctx.set_line_width(lw)
+        # R grid semantics: ``lwd`` is always in **points** (1/72 inch)
+        # regardless of the current viewport's scale.  Cairo's
+        # ``set_line_width`` takes a user-space distance, which the
+        # viewport CTM has scaled down to NPC-like units — so a value
+        # of 0.5 user-space becomes sub-pixel after ``scale(w, h)``.
+        # Convert ``lw`` from points → device pixels using the
+        # renderer's DPI, then back to user-space via
+        # ``device_to_user_distance`` so the stroke width stays at
+        # 0.5pt on the output device no matter how deep the
+        # viewport stack is (matches R grid's device-unit lwd).
+        dpi = getattr(self, "dpi", None) or getattr(self, "_dpi", 72.0) or 72.0
+        lw_px = lw * dpi / 72.0
+        try:
+            ux, uy = ctx.device_to_user_distance(lw_px, lw_px)
+            lw_user = max(abs(ux), abs(uy))
+        except Exception:
+            lw_user = lw
+        ctx.set_line_width(lw_user)
 
         lty = gp.get("lty", None)
         if lty is not None:
@@ -1422,7 +1439,20 @@ class CairoRenderer(GridRenderer):
             pattern.set_filter(cairo.FILTER_BILINEAR)
         else:
             pattern.set_filter(cairo.FILTER_NEAREST)
-        ctx.paint()
+        # Cairo default pattern.extend is EXTEND_NONE, which under
+        # BILINEAR filtering samples *outside* the image into
+        # transparent pixels — producing a soft halo that extends
+        # far beyond the declared raster bounds (observed as the
+        # "fuzzy colorbar" in vertical gradient legends).  EXTEND_PAD
+        # clamps the outside samples to the edge pixel, matching R's
+        # behaviour where rasterGrob paints exactly within its extent.
+        pattern.set_extend(cairo.EXTEND_PAD)
+        # Use rectangle+fill instead of paint() so the raster is
+        # confined to its declared w x h; paint() fills the unbounded
+        # clip region under the transformed pattern and the edge-pad
+        # extension would otherwise tile the edge colour outwards.
+        ctx.rectangle(0, 0, img_w, img_h)
+        ctx.fill()
 
         ctx.restore()
 
