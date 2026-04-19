@@ -20,6 +20,7 @@ from ._gpar import Gpar
 from ._patterns import LinearGradient, RadialGradient, Pattern
 from ._renderer_base import GridRenderer
 from ._scene_graph import (
+    DataGridNode,
     DefsCollection,
     GrobNode,
     SceneGraph,
@@ -148,6 +149,7 @@ _HTML_TEMPLATE = """\
 <script>
 {runtime_js}
 </script>
+{module_scripts}
 <script>
 gridpy.render(
     document.getElementById("gridpy-plot"),
@@ -213,6 +215,7 @@ class WebRenderer(GridRenderer):
         dpi: float = 150.0,
         default_hint: str = "auto",
         theme: str = "light",
+        interaction_modules: Optional[List[str]] = None,
     ) -> None:
         device_w = width * dpi
         device_h = height * dpi
@@ -238,6 +241,12 @@ class WebRenderer(GridRenderer):
 
         # Path collection buffer
         self._path_buffer: List[SceneNode] = []
+
+        # Interaction-module registry and DataGrid / tooltip-template bookkeeping
+        self._interaction_modules: List[str] = list(interaction_modules or [])
+        self._data_grids: List[DataGridNode] = []
+        self._tooltip_templates: Dict[str, Any] = {}
+        self._finalized: bool = False
 
     @property
     def _current_parent(self) -> SceneNode:
@@ -488,6 +497,13 @@ class WebRenderer(GridRenderer):
     def draw_text(self, x: float, y: float, label: str,
                   rot: float = 0.0, hjust: float = 0.5, vjust: float = 0.5,
                   gp: Optional[Any] = None) -> None:
+        gpar_dict = _serialise_gpar(gp, self._defs, self._id_gen)
+        # Ensure fontsize is always explicit so SVG renders at the size the
+        # layout engine measured with.  ``get_gpar()`` resolves against the
+        # active Gpar stack + grid_py's own default (12 pt, set in _gpar.py).
+        if "fontsize" not in gpar_dict:
+            from ._gpar import get_gpar
+            gpar_dict["fontsize"] = float(get_gpar().get("fontsize"))
         node = GrobNode(
             node_id=self._id_gen.next("grob"),
             node_type="text",
@@ -496,7 +512,7 @@ class WebRenderer(GridRenderer):
                 "label": str(label),
                 "rot": rot, "hjust": hjust, "vjust": vjust,
             },
-            gpar=_serialise_gpar(gp, self._defs, self._id_gen),
+            gpar=gpar_dict,
             render_hint="svg",  # Text always SVG
         )
         self._append_node(node)
@@ -644,15 +660,86 @@ class WebRenderer(GridRenderer):
     # Output                                                                #
     # ===================================================================== #
 
+    # ===================================================================== #
+    # Interaction-module & DataGrid registration                            #
+    # ===================================================================== #
+
+    def register_interaction_module(self, name: str) -> None:
+        """Request that the client load an extra JS module by name.
+
+        The module must exist as ``resources/<name>.js`` inside grid_py
+        (or be ``"gridpy"`` itself, which is always loaded).  Duplicate
+        registrations are collapsed.  Module names should be DNS-safe
+        (alphanumerics, dashes, underscores).
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("interaction module name must be a non-empty string")
+        if name not in self._interaction_modules:
+            self._interaction_modules.append(name)
+
+    def register_data_grid(self, grid: DataGridNode) -> None:
+        """Register a DataGridNode — typically one per heatmap body.
+
+        Upper-layer packages call this after drawing a rasterized body so
+        the JS runtime can resolve tooltips by pixel → (row, col) lookup.
+        """
+        if not isinstance(grid, DataGridNode):
+            raise TypeError("expected DataGridNode")
+        self._data_grids.append(grid)
+
+    def register_tooltip_template(self, name: str, spec: Any) -> None:
+        """Register a named tooltip template (compiled dict).
+
+        The runtime looks up templates via the ``tooltip_ref`` metadata
+        field on grob nodes.
+        """
+        self._tooltip_templates[str(name)] = spec
+
+    # ===================================================================== #
+    # Finalize — assemble entity_index and tooltip registry                 #
+    # ===================================================================== #
+
+    def finalize(self) -> None:
+        """Walk the scene graph and build the entity_index.
+
+        Idempotent.  Called implicitly by :meth:`to_scene_dict`.  After
+        finalization new nodes are still accepted (index is rebuilt on
+        subsequent calls).
+        """
+        entity_index: Dict[str, Dict[str, List[str]]] = {"row": {}, "col": {}}
+
+        def _visit(node: SceneNode) -> None:
+            if isinstance(node, GrobNode) and node.metadata:
+                md = node.metadata
+                row = md.get("row")
+                col = md.get("col")
+                if row is not None:
+                    entity_index["row"].setdefault(str(row), []).append(node.node_id)
+                if col is not None:
+                    entity_index["col"].setdefault(str(col), []).append(node.node_id)
+            for child in node.children:
+                _visit(child)
+
+        _visit(self._scene_root)
+        self._entity_index = entity_index
+        self._finalized = True
+
     def to_scene_dict(self) -> dict:
         """Return the scene graph as a plain dict (JSON-serialisable)."""
-        return SceneGraph(
+        if not self._finalized:
+            self.finalize()
+        sg = SceneGraph(
             width=self.width_in * self.dpi,
             height=self.height_in * self.dpi,
             dpi=self.dpi,
             root=self._scene_root,
             defs=self._defs,
-        ).to_dict()
+            interaction_modules=list(self._interaction_modules),
+            data_grids=list(self._data_grids),
+            entity_index=getattr(self, "_entity_index", {}),
+            tooltip_templates=dict(self._tooltip_templates),
+        )
+        return sg.to_dict()
 
     def to_scene_json(self, indent: Optional[int] = None) -> str:
         """Return the scene graph as a JSON string."""
@@ -673,8 +760,23 @@ class WebRenderer(GridRenderer):
             must work without network access (e.g. Jupyter iframe).
         """
         scene_json = self.to_scene_json()
-        css = _load_resource("gridpy.css")
+        css_parts = [_load_resource("gridpy.css")]
+        for mod_name in self._interaction_modules:
+            css_path = os.path.join(_RESOURCES_DIR, f"{mod_name}.css")
+            if os.path.isfile(css_path):
+                css_parts.append(_load_resource(f"{mod_name}.css"))
+        css = "\n".join(css_parts)
         runtime_js = _load_resource("gridpy.js")
+
+        module_scripts_parts: List[str] = []
+        for mod_name in self._interaction_modules:
+            js_path = os.path.join(_RESOURCES_DIR, f"{mod_name}.js")
+            if os.path.isfile(js_path):
+                module_scripts_parts.append(
+                    "<script>" + _load_resource(f"{mod_name}.js") + "</script>"
+                )
+        module_scripts = "\n".join(module_scripts_parts)
+
         if inline_d3:
             d3_block = "<script>" + _load_resource("d3.v7.min.js") + "</script>"
         elif cdn:
@@ -685,6 +787,7 @@ class WebRenderer(GridRenderer):
             css=css,
             d3_block=d3_block,
             runtime_js=runtime_js,
+            module_scripts=module_scripts,
             scene_json=scene_json,
             interactive="true" if interactive else "false",
             theme=self._theme,
@@ -737,6 +840,10 @@ class WebRenderer(GridRenderer):
         self._layout_depth_stack = []
         self._clip_stack = []
         self._path_collecting = False
+        # Reset interaction registries for a fresh page
+        self._data_grids = []
+        self._tooltip_templates = {}
+        self._finalized = False
 
     def finish(self) -> None:
         pass  # No resources to release

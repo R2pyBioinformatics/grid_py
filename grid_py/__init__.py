@@ -133,6 +133,12 @@ from grid_py._renderer_base import GridRenderer
 from grid_py.renderer import CairoRenderer
 from grid_py.renderer_web import WebRenderer
 
+# --- Scene graph (for interactive / upper-layer integration) ---
+from grid_py._scene_graph import (
+    SceneGraph, SceneNode, ViewportNode, GrobNode,
+    DataGridNode, DefsCollection,
+)
+
 # --- Drawing ---
 from grid_py._draw import (
     grid_draw, grid_newpage, grid_refresh,

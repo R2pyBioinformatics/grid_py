@@ -22,6 +22,42 @@
 
 .gridpy-svg text {
     user-select: none;
+    /* Match grid_py.Gpar default (R grid default is 12pt).  Without
+       an explicit rule the browser falls back to 16px, making rendered
+       text ~33% wider than what the layout engine measured. */
+    font-size: 12px;
+    font-family: sans-serif;
+}
+
+/* Match grid_py.Gpar defaults for SVG shapes when the grob itself did
+   NOT set the corresponding presentation attribute.  R/grid resolves
+   unset ``col`` to ``"black"`` (renderer.py:_set_stroke lines 339-340)
+   and unset ``fill`` to ``"transparent"``; SVG's own defaults are the
+   opposite (``stroke="none"`` on lines, ``fill="black"`` on shapes),
+   which would make e.g. dendrogram segments invisible and every border
+   rect solid black.
+
+   CSS has HIGHER precedence than SVG presentation attributes, so we
+   must guard each rule with ``:not([attr])`` — otherwise the default
+   would override per-cell fills set by ``.attr("fill", ...)`` on the
+   heatmap body. */
+.gridpy-svg line:not([stroke]),
+.gridpy-svg polyline:not([stroke]),
+.gridpy-svg path:not([stroke]),
+.gridpy-svg polygon:not([stroke]),
+.gridpy-svg rect:not([stroke]),
+.gridpy-svg circle:not([stroke]) {
+    stroke: black;
+}
+.gridpy-svg line:not([fill]),
+.gridpy-svg polyline:not([fill]),
+.gridpy-svg path:not([fill]) {
+    fill: none;
+}
+.gridpy-svg rect:not([fill]),
+.gridpy-svg circle:not([fill]),
+.gridpy-svg polygon:not([fill]) {
+    fill: transparent;
 }
 
 /* Canvas layer */

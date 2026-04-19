@@ -24,10 +24,18 @@ var gridpy = (function () {
 
     function applyGparSvg(sel, gpar) {
         if (!gpar) return;
-        var fill = parseColour(gpar.fill);
-        var col = parseColour(gpar.col);
-        if (fill !== undefined) sel.attr("fill", fill || "none");
-        if (col !== undefined) sel.attr("stroke", col || "none");
+        // Only touch fill / stroke when the gpar *explicitly* carries the
+        // key.  Earlier code did ``parseColour(gpar.col) !== undefined`` —
+        // but ``parseColour(undefined)`` returns ``null`` and
+        // ``null !== undefined`` is true, so we were setting stroke="none"
+        // for every shape whose col wasn't specified (dendrogram segments,
+        // borders, etc.), making them invisible.
+        if (gpar.fill !== undefined) {
+            sel.attr("fill", parseColour(gpar.fill) || "none");
+        }
+        if (gpar.col !== undefined) {
+            sel.attr("stroke", parseColour(gpar.col) || "none");
+        }
         if (gpar.lwd !== undefined) sel.attr("stroke-width", gpar.lwd);
         if (gpar.alpha !== undefined) sel.attr("opacity", gpar.alpha);
         if (gpar.lty) sel.attr("stroke-dasharray", ltyToDash(gpar.lty));
@@ -227,10 +235,16 @@ var gridpy = (function () {
                 break;
 
             case "text":
+                // hjust / vjust can legitimately be 0 (left / bottom aligned).
+                // ``x || default`` treats 0 as falsy and silently flips to
+                // centre-aligned text — which is how row-name labels ended up
+                // overlapping the heatmap body.  Use explicit null check.
+                var _hj = (p.hjust == null) ? 0.5 : p.hjust;
+                var _vj = (p.vjust == null) ? 0.5 : p.vjust;
                 var txt = parentG.append("text")
                     .attr("x", p.x).attr("y", p.y)
-                    .attr("text-anchor", hjustToAnchor(p.hjust || 0.5))
-                    .attr("dominant-baseline", vjustToBaseline(p.vjust || 0.5))
+                    .attr("text-anchor", hjustToAnchor(_hj))
+                    .attr("dominant-baseline", vjustToBaseline(_vj))
                     .text(p.label || "")
                     .attr("data-id", node.id)
                     .call(applyTextGparSvg, node.gpar);
@@ -772,10 +786,47 @@ var gridpy = (function () {
             state.quadtree = buildQuadtree(state.hitItems);
         }
 
-        // Bind interactions
+        // Index SVG DOM nodes by their source grob node_id so plugins can
+        // find rendered elements by metadata entity_id / node_id.
+        state.grobById = {};
+        state.dataById = {};
+        if (svgRoot && svgRoot.node()) {
+            var all = svgRoot.node().querySelectorAll("[data-id]");
+            for (var i = 0; i < all.length; i++) {
+                var nid = all[i].getAttribute("data-id");
+                if (nid) state.grobById[nid] = all[i];
+            }
+        }
+        indexSceneData(sg.root, state);
+
+        // Plugins registered via gridpy.registerModule() run AFTER core
+        // interactions are bound but BEFORE the render() call returns, so
+        // they can mutate state, attach overlays, etc.
         bindInteractions(state, options);
 
+        var modules = sg.interaction_modules || options.interactionModules || [];
+        state.modules = {};
+        for (var m = 0; m < modules.length; m++) {
+            var modName = modules[m];
+            var mod = _modules[modName];
+            if (mod && typeof mod.attach === "function") {
+                try {
+                    state.modules[modName] = mod.attach(state, sg, options);
+                } catch (e) {
+                    if (typeof console !== "undefined") {
+                        console.error("gridpy module " + modName + " failed:", e);
+                    }
+                }
+            }
+        }
+
         return state;
+    }
+
+    function indexSceneData(node, state) {
+        if (!node) return;
+        if (node.data) state.dataById[node.id] = node.data;
+        (node.children || []).forEach(function (c) { indexSceneData(c, state); });
     }
 
     function renderTree(node, state, parentG) {
@@ -802,10 +853,63 @@ var gridpy = (function () {
         }
     }
 
+    // ---- Plugin registry --------------------------------------------------
+    //
+    // Plugins are keyed by module name.  Each plugin is an object with at
+    // least an ``attach(state, sceneGraph, options)`` function.  The
+    // Python-side ``WebRenderer(interaction_modules=[...])`` parameter
+    // causes corresponding ``<name>.js`` resources to be included in the
+    // generated HTML; those scripts should call
+    // ``gridpy.registerModule("<name>", { attach: ... })`` on load.
+
+    var _modules = {};
+
+    function registerModule(name, mod) {
+        if (!name || !mod) return;
+        _modules[name] = mod;
+    }
+
+    // ---- Event bus helpers exposed to plugins ------------------------------
+
+    function on(state, eventName, handler) {
+        state.container.addEventListener("gridpy:" + eventName, function (e) {
+            handler(e.detail, e);
+        });
+    }
+
+    function emit(state, eventName, detail) {
+        emitEvent(state, eventName, detail);
+    }
+
+    function showTooltipPublic(state, html, mx, my) {
+        var tooltip = state.tooltip;
+        if (!tooltip) return;
+        tooltip.innerHTML = html;
+        tooltip.classList.add("visible");
+        var tw = tooltip.offsetWidth || 100;
+        var th = tooltip.offsetHeight || 30;
+        var cw = state.container.offsetWidth;
+        var left = mx + 12;
+        var top = my - th - 8;
+        if (left + tw > cw) left = mx - tw - 12;
+        if (top < 0) top = my + 12;
+        tooltip.style.left = left + "px";
+        tooltip.style.top = top + "px";
+    }
+
+    function hideTooltipPublic(state) {
+        if (state.tooltip) state.tooltip.classList.remove("visible");
+    }
+
     // ---- Public API -------------------------------------------------------
 
     return {
         render: render,
+        registerModule: registerModule,
+        on: on,
+        emit: emit,
+        showTooltip: showTooltipPublic,
+        hideTooltip: hideTooltipPublic,
         CANVAS_THRESHOLD: CANVAS_THRESHOLD,
         version: "0.1.0"
     };
