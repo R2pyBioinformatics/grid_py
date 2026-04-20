@@ -611,22 +611,36 @@ class GridState:
     def init_device(
         self,
         renderer: Any,
-        width_cm: float = _DEFAULT_DEVICE_WIDTH_CM,
-        height_cm: float = _DEFAULT_DEVICE_HEIGHT_CM,
+        width_cm: Optional[float] = None,
+        height_cm: Optional[float] = None,
     ) -> None:
         """Bind the state to a rendering backend.
+
+        If ``width_cm`` / ``height_cm`` are not supplied, they are read
+        from the renderer's own ``width_in`` / ``height_in`` fields so the
+        unit system uses the same canvas the renderer is drawing on.  This
+        avoids a systematic mismatch where the state defaulted to a 7-inch
+        square canvas while the renderer was actually 6×4 inches, causing
+        ``strwidth`` / ``strheight`` to be converted to native coordinates
+        against the wrong reference width.
 
         Parameters
         ----------
         renderer : GridRenderer
             A :class:`GridRenderer` subclass instance (e.g.
             ``CairoRenderer`` or ``WebRenderer``).
-        width_cm : float, optional
-            Device width in centimetres (default ~7 in).
-        height_cm : float, optional
-            Device height in centimetres (default ~7 in).
+        width_cm, height_cm : float, optional
+            Device dimensions in centimetres.  If ``None``, pulled from
+            the renderer's own ``width_in`` / ``height_in`` when
+            available, otherwise defaulted to ``_DEFAULT_DEVICE_*_CM``.
         """
         self._renderer = renderer
+        if width_cm is None:
+            w_in = float(getattr(renderer, "width_in", 0.0) or 0.0)
+            width_cm = w_in * 2.54 if w_in > 0 else _DEFAULT_DEVICE_WIDTH_CM
+        if height_cm is None:
+            h_in = float(getattr(renderer, "height_in", 0.0) or 0.0)
+            height_cm = h_in * 2.54 if h_in > 0 else _DEFAULT_DEVICE_HEIGHT_CM
         self._device_width_cm = float(width_cm)
         self._device_height_cm = float(height_cm)
 
