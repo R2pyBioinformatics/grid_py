@@ -506,6 +506,13 @@ def _transform_to_inches(
         if grob_metric_fn is not None and data is not None:
             inches = grob_metric_fn(data, utype, value)
             if inches is not None:
+                # For width / height / ascent / descent, ``value`` is a
+                # scaling factor (usually 1) — the result scales linearly.
+                # For grobx / groby, ``value`` carries the evaluation angle
+                # (degrees) and the callback already returned the absolute
+                # x/y coordinate in inches, so no extra scaling applies.
+                if utype in ("grobx", "groby"):
+                    return inches
                 return value * inches
         return 0.0
 
