@@ -33,7 +33,7 @@ from ._arrow import Arrow
 from ._gpar import Gpar
 from ._grob import GList, GTree, Grob
 from ._primitives import lines_grob, segments_grob
-from ._units import Unit, is_unit
+from ._units import Unit, convert_x, convert_y, is_unit
 
 __all__ = [
     # curve
@@ -840,7 +840,7 @@ def curve_grob(
 
     angle = angle % 180
 
-    return GTree(
+    return _CurveGrob(
         name=name,
         gp=gp,
         vp=vp,
@@ -858,6 +858,197 @@ def curve_grob(
         inflect=bool(inflect),
         arrow=arrow,
         open_=bool(open_),
+    )
+
+
+class _CurveGrob(GTree):
+    """GTree for ``_grid_class="curve"``.
+
+    ``make_content`` lazily expands the curve into ``segments`` and / or
+    ``xspline`` children at draw time, so endpoint unit conversion happens
+    in the current viewport context.
+    """
+
+    def make_content(self) -> Grob:
+        return _calc_curve_content(self)
+
+
+def _calc_curve_content(x: "_CurveGrob") -> GTree:
+    """Expand a curve grob into a gTree of segments / xspline children.
+
+    curvature = 0 or near-flat angles produce a plain ``segments_grob``.
+    Under ``square=True`` horizontal / vertical segments are peeled off
+    (``_calc_control_points`` divides by dx / dy).  Other cases build an
+    xspline from control points, optionally reflecting about the midpoint
+    when ``inflect=True``.
+    """
+    x1_u = x.x1
+    y1_u = x.y1
+    x2_u = x.x2
+    y2_u = x.y2
+    curvature = float(x.curvature)
+    angle = float(x.angle)
+    ncp = int(x.ncp)
+    shape = float(x.shape)
+    square = bool(x.square)
+    squareShape = float(x.squareShape)
+    inflect = bool(x.inflect)
+    arrow = x.arrow
+    open_ = bool(x.open_)
+
+    x1 = np.atleast_1d(np.asarray(convert_x(x1_u, "inches", valueOnly=True), dtype=float))
+    y1 = np.atleast_1d(np.asarray(convert_y(y1_u, "inches", valueOnly=True), dtype=float))
+    x2 = np.atleast_1d(np.asarray(convert_x(x2_u, "inches", valueOnly=True), dtype=float))
+    y2 = np.atleast_1d(np.asarray(convert_y(y2_u, "inches", valueOnly=True), dtype=float))
+
+    if np.any((x1 == x2) & (y1 == y2)):
+        raise ValueError("end points must not be identical")
+
+    maxn = int(max(len(x1), len(y1), len(x2), len(y2)))
+    x1 = np.resize(x1, maxn)
+    y1 = np.resize(y1, maxn)
+    x2 = np.resize(x2, maxn)
+    y2 = np.resize(y2, maxn)
+
+    def _straight(a1: np.ndarray, b1: np.ndarray, a2: np.ndarray, b2: np.ndarray) -> Grob:
+        return segments_grob(
+            x0=a1, y0=b1, x1=a2, y1=b2,
+            default_units="inches", arrow=arrow, name="segment",
+        )
+
+    children_list: List[Grob] = []
+
+    if curvature == 0:
+        children_list.append(_straight(x1, y1, x2, y2))
+    else:
+        if angle < 1 or angle > 179:
+            children_list.append(_straight(x1, y1, x2, y2))
+        else:
+            straight_grob: Optional[Grob] = None
+            if square:
+                subset = (x1 == x2) | (y1 == y2)
+                if np.any(subset):
+                    straight_grob = _straight(x1[subset], y1[subset], x2[subset], y2[subset])
+                    keep = ~subset
+                    x1 = x1[keep]
+                    y1 = y1[keep]
+                    x2 = x2[keep]
+                    y2 = y2[keep]
+
+            ncurve = int(len(x1))
+            if ncurve == 0:
+                if straight_grob is not None:
+                    children_list.append(straight_grob)
+            else:
+                base_shape = np.full(ncp * ncurve, shape, dtype=float)
+
+                if inflect:
+                    xm = (x1 + x2) / 2.0
+                    ym = (y1 + y2) / 2.0
+                    shape1 = base_shape.copy()
+                    shape2 = base_shape[::-1].copy()
+
+                    if square:
+                        cpx1, cpy1, end1 = _calc_square_control_points(
+                            x1, y1, xm, ym, curvature, angle, ncp,
+                        )
+                        cpx2, cpy2, end2 = _calc_square_control_points(
+                            xm, ym, x2, y2, -curvature, angle, ncp,
+                        )
+                        shape1 = _interleave(
+                            ncp, ncurve, shape1,
+                            np.full(ncurve, squareShape),
+                            np.full(ncurve, squareShape),
+                            end1,
+                        )
+                        shape2 = _interleave(
+                            ncp, ncurve, shape2,
+                            np.full(ncurve, squareShape),
+                            np.full(ncurve, squareShape),
+                            end2,
+                        )
+                        ncp_eff = ncp + 1
+                    else:
+                        cpx1, cpy1 = _calc_control_points(
+                            x1, y1, xm, ym, curvature, angle, ncp,
+                        )
+                        cpx2, cpy2 = _calc_control_points(
+                            xm, ym, x2, y2, -curvature, angle, ncp,
+                        )
+                        ncp_eff = ncp
+
+                    idset = np.arange(1, ncurve + 1, dtype=int)
+                    spline_x = np.concatenate([x1, cpx1, xm, cpx2, x2])
+                    spline_y = np.concatenate([y1, cpy1, ym, cpy2, y2])
+                    rep_id = np.repeat(idset, ncp_eff)
+                    spline_id = np.concatenate([idset, rep_id, idset, rep_id, idset])
+                    spline_shape = np.concatenate([
+                        np.zeros(ncurve),
+                        shape1,
+                        np.zeros(ncurve),
+                        shape2,
+                        np.zeros(ncurve),
+                    ])
+                    spline = xspline_grob(
+                        x=spline_x, y=spline_y,
+                        default_units="inches",
+                        shape=spline_shape,
+                        open_=open_, arrow=arrow,
+                        name="xspline",
+                    )
+                    spline.id = spline_id
+                    if straight_grob is not None:
+                        children_list.extend([straight_grob, spline])
+                    else:
+                        children_list.append(spline)
+                else:
+                    shape_arr = base_shape
+                    if square:
+                        cpx, cpy, cend = _calc_square_control_points(
+                            x1, y1, x2, y2, curvature, angle, ncp,
+                        )
+                        shape_arr = _interleave(
+                            ncp, ncurve, shape_arr,
+                            np.full(ncurve, squareShape),
+                            np.full(ncurve, squareShape),
+                            cend,
+                        )
+                        ncp_eff = ncp + 1
+                    else:
+                        cpx, cpy = _calc_control_points(
+                            x1, y1, x2, y2, curvature, angle, ncp,
+                        )
+                        ncp_eff = ncp
+
+                    idset = np.arange(1, ncurve + 1, dtype=int)
+                    spline_x = np.concatenate([x1, cpx, x2])
+                    spline_y = np.concatenate([y1, cpy, y2])
+                    spline_id = np.concatenate([
+                        idset,
+                        np.repeat(idset, ncp_eff),
+                        idset,
+                    ])
+                    spline_shape = np.concatenate([
+                        np.zeros(ncurve),
+                        shape_arr,
+                        np.zeros(ncurve),
+                    ])
+                    spline = xspline_grob(
+                        x=spline_x, y=spline_y,
+                        default_units="inches",
+                        shape=spline_shape,
+                        open_=open_, arrow=arrow,
+                        name="xspline",
+                    )
+                    spline.id = spline_id
+                    if straight_grob is not None:
+                        children_list.extend([straight_grob, spline])
+                    else:
+                        children_list.append(spline)
+
+    return GTree(
+        children=GList(*children_list),
+        name=x.name, gp=x.gp, vp=x.vp,
     )
 
 
