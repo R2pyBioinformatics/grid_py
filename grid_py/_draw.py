@@ -460,10 +460,10 @@ def _render_grob(
         _GROB_RENDERERS[cls](grob, renderer, gp)
 
     else:
-        warnings.warn(
-            f"_render_grob: unknown grob class '{cls}', skipping",
-            stacklevel=2,
-        )
+        # Unknown ``_grid_class`` → silent no-op.  Any grob without a
+        # dedicated draw routine or renderer registration simply draws
+        # nothing.
+        pass
 
     # Clear grob metadata after rendering
     if metadata is not None and hasattr(renderer, "clear_grob_metadata"):

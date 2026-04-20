@@ -109,7 +109,8 @@ class TestRenderGrob:
         g = Grob(name="test", _grid_class="rect")
         _render_grob(g, None)  # Should not crash
 
-    def test_render_unknown_class_warns(self):
+    def test_render_unknown_class_is_silent_noop(self):
+        """Unknown ``_grid_class`` draws nothing and emits no warning."""
         g = Grob(name="test", _grid_class="totally_unknown_class")
 
         class MockRenderer:
@@ -118,7 +119,7 @@ class TestRenderGrob:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _render_grob(g, MockRenderer())
-            assert any("unknown grob class" in str(x.message) for x in w)
+            assert not any("unknown grob class" in str(x.message) for x in w)
 
     def test_render_null_noop(self):
         g = Grob(name="test", _grid_class="null")

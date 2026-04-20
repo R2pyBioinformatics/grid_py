@@ -214,14 +214,14 @@ class TestRenderGrob:
         g.image = None
         _render_grob(g, r, gp=Gpar())
 
-    def test_unknown_class_warns(self):
+    def test_unknown_class_is_silent_noop(self):
+        """Unknown ``_grid_class`` draws nothing and emits no warning."""
         r = self._make_renderer()
         g = Grob(name="u", _grid_class="unknown_grob_type")
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _render_grob(g, r, gp=Gpar())
-            assert len(w) >= 1
-            assert "unknown grob class" in str(w[0].message)
+            assert not any("unknown grob class" in str(msg.message) for msg in w)
 
 
 class TestVpDepth:

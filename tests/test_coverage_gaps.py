@@ -1175,14 +1175,14 @@ class TestRenderGrobDispatch:
         g = null_grob()
         _render_grob(g, r)
 
-    def test_render_unknown_class(self):
+    def test_render_unknown_class_is_silent_noop(self):
+        """Unknown ``_grid_class`` draws nothing and emits no warning."""
         r = self._make_renderer()
         g = Grob(_grid_class="xyzzy_unknown")
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _render_grob(g, r)
-            found = any("unknown grob class" in str(msg.message) for msg in w)
-            assert found
+            assert not any("unknown grob class" in str(msg.message) for msg in w)
 
     def test_render_none_renderer(self):
         """_render_grob with None renderer should be a no-op."""
