@@ -167,6 +167,101 @@ def register_grob_renderer(cls_name: str, fn: Callable) -> None:
     _GROB_RENDERERS[cls_name] = fn
 
 
+def _draw_arrow_heads(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    arrow: Any,
+    renderer: Any,
+    gp: Optional[Gpar],
+) -> None:
+    """Draw arrowheads at the requested end(s) of a polyline.
+
+    Parameters
+    ----------
+    xs, ys : ndarray
+        The polyline's x / y coordinates in device space.
+    arrow : Arrow
+        Arrow specification (angle, length, ends, type).  May be ``None`` —
+        caller should guard.
+    renderer, gp : rendering context.
+    """
+    import math
+
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    n = len(xs)
+    if n < 2:
+        return
+
+    angle_deg = float(np.atleast_1d(arrow.angle)[0])
+    ends = int(np.atleast_1d(arrow.ends)[0])
+    atype = int(np.atleast_1d(arrow.type)[0])
+    # Arrow length is a Unit; resolve in device width (x-direction dimension).
+    length_unit = arrow.length
+    if hasattr(length_unit, "__len__"):
+        from ._units import Unit
+        if isinstance(length_unit, Unit):
+            length_unit = length_unit[0] if len(length_unit) > 0 else length_unit
+    # R: ``l = fmin2(transformWidthtoINCHES(...), transformHeighttoINCHES(...))``
+    # (src/library/grid/src/grid.c::calcArrow).  Resolving the length as both
+    # width and height and taking the min keeps the arrowhead aspect-ratio
+    # stable when the length is given in non-absolute units like ``npc``.
+    try:
+        l_w = float(renderer.resolve_w(length_unit, gp=gp))
+        l_h = float(renderer.resolve_h(length_unit, gp=gp))
+    except Exception:
+        return
+    length_dev = min(l_w, l_h)
+    if not (length_dev > 0):
+        return
+
+    half_angle = math.radians(angle_deg)
+    cos_a = math.cos(half_angle)
+    sin_a = math.sin(half_angle)
+
+    endpoints: List[Tuple[float, float, float, float]] = []
+    # ``ends``: 1 = first, 2 = last, 3 = both.  For each, we record the
+    # arrow tip (tip_x, tip_y) and the *inward* tangent direction
+    # (tan_x, tan_y) — pointing from the tip back along the shaft.
+    if ends in (1, 3):
+        tx = xs[1] - xs[0]
+        ty = ys[1] - ys[0]
+        L = math.hypot(tx, ty)
+        if L > 0:
+            endpoints.append((float(xs[0]), float(ys[0]), tx / L, ty / L))
+    if ends in (2, 3):
+        tx = xs[-2] - xs[-1]
+        ty = ys[-2] - ys[-1]
+        L = math.hypot(tx, ty)
+        if L > 0:
+            endpoints.append((float(xs[-1]), float(ys[-1]), tx / L, ty / L))
+
+    for tip_x, tip_y, tan_x, tan_y in endpoints:
+        # Wing tips: rotate the inward tangent by ±half_angle and scale by
+        # length_dev; add to the tip.
+        w1x = tip_x + length_dev * (cos_a * tan_x - sin_a * tan_y)
+        w1y = tip_y + length_dev * (sin_a * tan_x + cos_a * tan_y)
+        w2x = tip_x + length_dev * (cos_a * tan_x + sin_a * tan_y)
+        w2y = tip_y + length_dev * (-sin_a * tan_x + cos_a * tan_y)
+
+        if atype == 1:
+            # Open: two short line segments forming a V (tip -> wing1, tip -> wing2).
+            renderer.draw_segments(
+                x0=np.array([tip_x, tip_x], dtype=float),
+                y0=np.array([tip_y, tip_y], dtype=float),
+                x1=np.array([w1x, w2x], dtype=float),
+                y1=np.array([w1y, w2y], dtype=float),
+                gp=gp,
+            )
+        else:
+            # Closed: filled triangle wing1 -> tip -> wing2.
+            renderer.draw_polygon(
+                np.array([w1x, tip_x, w2x], dtype=float),
+                np.array([w1y, tip_y, w2y], dtype=float),
+                gp=gp,
+            )
+
+
 def _render_grob(
     grob: Grob,
     renderer: Any,
@@ -264,13 +359,87 @@ def _render_grob(
 
     # ---- segments --------------------------------------------------------
     elif cls == "segments":
-        renderer.draw_segments(
-            x0=renderer.resolve_x_array(getattr(grob, "x0", []), gp=gp),
-            y0=renderer.resolve_y_array(getattr(grob, "y0", []), gp=gp),
-            x1=renderer.resolve_x_array(getattr(grob, "x1", []), gp=gp),
-            y1=renderer.resolve_y_array(getattr(grob, "y1", []), gp=gp),
-            gp=gp,
-        )
+        x0 = renderer.resolve_x_array(getattr(grob, "x0", []), gp=gp)
+        y0 = renderer.resolve_y_array(getattr(grob, "y0", []), gp=gp)
+        x1 = renderer.resolve_x_array(getattr(grob, "x1", []), gp=gp)
+        y1 = renderer.resolve_y_array(getattr(grob, "y1", []), gp=gp)
+        renderer.draw_segments(x0=x0, y0=y0, x1=x1, y1=y1, gp=gp)
+
+        # Each segment may carry its own arrowhead (``arrow=`` parameter on
+        # segmentsGrob).  Draw one per row, treating the segment's two points
+        # as the reference polyline.
+        arr = getattr(grob, "arrow", None)
+        if arr is not None:
+            for i in range(len(x0)):
+                _draw_arrow_heads(
+                    np.array([float(x0[i]), float(x1[i])]),
+                    np.array([float(y0[i]), float(y1[i])]),
+                    arr, renderer, gp,
+                )
+
+    # ---- xspline ---------------------------------------------------------
+    elif cls == "xspline":
+        from ._curve import _calc_xspline_points  # lazy to avoid import cycle
+
+        x = renderer.resolve_x_array(getattr(grob, "x", [0.0, 1.0]), gp=gp)
+        y = renderer.resolve_y_array(getattr(grob, "y", [0.0, 1.0]), gp=gp)
+        shape_raw = getattr(grob, "shape", 0.0)
+        open_ = bool(getattr(grob, "open_", True))
+        rep_ends = bool(getattr(grob, "repEnds", True))
+
+        id_ = getattr(grob, "id", None)
+        id_lengths = getattr(grob, "id_lengths", None)
+        if id_ is None and id_lengths is not None:
+            lengths = np.atleast_1d(np.asarray(id_lengths, dtype=int))
+            id_ = np.repeat(np.arange(1, len(lengths) + 1), lengths)
+
+        if np.isscalar(shape_raw):
+            shape_arr = np.full(len(x), float(shape_raw))
+        else:
+            shape_arr = np.atleast_1d(np.asarray(shape_raw, dtype=float))
+            if len(shape_arr) < len(x):
+                shape_arr = np.resize(shape_arr, len(x))
+
+        arr = getattr(grob, "arrow", None)
+
+        if id_ is None:
+            xs, ys = _calc_xspline_points(
+                x, y, shape=shape_arr, open_=open_, repEnds=rep_ends,
+            )
+            renderer.draw_polyline(xs, ys, id_=None, gp=gp)
+            if arr is not None and len(xs) >= 2:
+                _draw_arrow_heads(xs, ys, arr, renderer, gp)
+        else:
+            id_arr = np.atleast_1d(np.asarray(id_, dtype=int))
+            all_xs: List[float] = []
+            all_ys: List[float] = []
+            all_ids: List[int] = []
+            out_id = 1
+            per_group: List[Tuple[np.ndarray, np.ndarray]] = []
+            for uid in np.unique(id_arr):
+                mask = id_arr == uid
+                xs_g, ys_g = _calc_xspline_points(
+                    x[mask], y[mask],
+                    shape=shape_arr[mask],
+                    open_=open_,
+                    repEnds=rep_ends,
+                )
+                all_xs.extend(xs_g.tolist())
+                all_ys.extend(ys_g.tolist())
+                all_ids.extend([out_id] * len(xs_g))
+                out_id += 1
+                per_group.append((xs_g, ys_g))
+            if all_xs:
+                renderer.draw_polyline(
+                    np.asarray(all_xs, dtype=float),
+                    np.asarray(all_ys, dtype=float),
+                    id_=np.asarray(all_ids, dtype=int),
+                    gp=gp,
+                )
+                if arr is not None:
+                    for xs_g, ys_g in per_group:
+                        if len(xs_g) >= 2:
+                            _draw_arrow_heads(xs_g, ys_g, arr, renderer, gp)
 
     # ---- polygon ---------------------------------------------------------
     elif cls == "polygon":
