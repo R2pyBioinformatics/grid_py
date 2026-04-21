@@ -269,8 +269,16 @@ def _calc_control_points(
     # Direction and angular sweep for control points
     direction = 1.0 if hand == "right" else -1.0
     maxtheta = math.pi + math.copysign(1.0, origin * direction) * 2.0 * math.atan(abs(origin))
-    theta_all = np.linspace(0.0, direction * maxtheta, ncp + 2)
-    # Drop first and last
+    # Port of R's ``seq(from, to, by)``:  ``seq(0, 0, by=0)`` returns
+    # ``c(0)`` of length 1, not a length-``ncp+2`` ramp.
+    step = direction * maxtheta / (ncp + 1)
+    if step == 0.0:
+        theta_all = np.array([0.0])
+    else:
+        theta_all = np.linspace(0.0, direction * maxtheta, ncp + 2)
+    # R's ``[c(-1, -(ncp+2))]`` — drop first and last.  On a length-1
+    # vector R silently allows out-of-range negative indices, yielding
+    # an empty result.  ``theta_all[1:-1]`` matches both cases.
     theta = theta_all[1:-1]
     costheta = np.cos(theta)
     sintheta = np.sin(theta)
@@ -325,13 +333,25 @@ def _interleave(
     """
     sval = np.resize(sval, ncurve)
     eval_ = np.resize(eval_, ncurve)
-    m = val.reshape((ncp, ncurve), order="F")
+    # Port of R's ``matrix(val, ncol=ncurve)``:  empty ``val`` yields a
+    # ``0 × ncurve`` matrix (numpy's reshape would raise otherwise).
+    if val.size == 0:
+        m = np.empty((0, ncurve), dtype=np.float64)
+    else:
+        m = val.reshape((ncp, ncurve), order="F")
     result = np.empty((ncp + 1, ncurve), dtype=np.float64)
     for i in range(ncurve):
         if end[i]:
-            result[:, i] = np.concatenate([m[:, i], [eval_[i]]])
+            col = np.concatenate([m[:, i], [eval_[i]]])
         else:
-            result[:, i] = np.concatenate([[sval[i]], m[:, i]])
+            col = np.concatenate([[sval[i]], m[:, i]])
+        # R's ``result[,i] <- <shorter vector>`` recycles the rhs to
+        # fill the column; for ``val`` empty the rhs is a length-1
+        # scalar, which broadcasts naturally.
+        if col.size == 1:
+            result[:, i] = col[0]
+        else:
+            result[:, i] = col
     return result.ravel(order="F")
 
 
