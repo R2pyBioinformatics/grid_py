@@ -50,6 +50,19 @@ _LTY_DASHES: Dict[str, Optional[Sequence[float]]] = {
     "blank": [0.0, 100.0],
 }
 
+# R allows ``lty`` to be an integer 0..6 (par docs): 0=blank, 1=solid,
+# 2=dashed, 3=dotted, 4=dotdash, 5=longdash, 6=twodash.  Map to the
+# named equivalents so downstream dash lookup works for both forms.
+_LTY_INT_TO_NAME: Dict[int, str] = {
+    0: "blank",
+    1: "solid",
+    2: "dashed",
+    3: "dotted",
+    4: "dotdash",
+    5: "longdash",
+    6: "twodash",
+}
+
 _LINEEND_MAP = {
     "round": cairo.LINE_CAP_ROUND,
     "butt": cairo.LINE_CAP_BUTT,
@@ -373,7 +386,12 @@ class CairoRenderer(GridRenderer):
 
         lty = gp.get("lty", None)
         if lty is not None:
-            lty_val = str(lty[0] if isinstance(lty, (list, tuple)) else lty)
+            raw = lty[0] if isinstance(lty, (list, tuple)) else lty
+            # R integer code (0..6) → name
+            if isinstance(raw, (int, float, np.integer, np.floating)) and \
+               not isinstance(raw, bool):
+                raw = _LTY_INT_TO_NAME.get(int(raw), str(raw))
+            lty_val = str(raw)
             dashes = _LTY_DASHES.get(lty_val)
             if dashes is not None:
                 ctx.set_dash(dashes)
