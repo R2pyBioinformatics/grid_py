@@ -5,7 +5,38 @@ Python port of the R **grid** package.
 ## Installation
 
 ```bash
+pip install rgrid-python
+```
+
+The importable package name is `grid_py`:
+
+```python
+import grid_py
+```
+
+### System requirements
+
+`grid_py` depends on [`pycairo`](https://pypi.org/project/pycairo/), which
+builds against the system **cairo** library. Install the system package
+*before* `pip install rgrid-python`:
+
+| Platform | Command |
+|---|---|
+| Ubuntu / Debian | `sudo apt install libcairo2-dev pkg-config python3-dev` |
+| Fedora / RHEL | `sudo dnf install cairo-devel pkgconf-pkg-config python3-devel` |
+| macOS (Homebrew) | `brew install cairo pkg-config` |
+| Windows | `conda install -c conda-forge pycairo` *(recommended; the MSVC build is fiddly)* |
+
+`conda install -c conda-forge pycairo` is also the easiest route on Linux /
+macOS if you prefer not to touch system packages.
+
+### Development install
+
+```bash
+git clone https://github.com/Bio-Babel/grid_py
+cd grid_py
 pip install -e ".[dev]"
+pytest                       # 2600+ tests
 ```
 
 ## Quick Start

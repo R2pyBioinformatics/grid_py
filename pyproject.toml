@@ -3,25 +3,84 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "grid_py"
-version = "4.5.3-R4.5.3"
-description = "Python port of the R grid package"
+# PyPI distribution name.  The Python ``import`` name stays ``grid_py``.
+# ``grid-py`` / ``grid_py`` / ``grid-python`` are blocked by PyPI's
+# similarity guard (too close to the existing ``grid`` project), hence
+# the ``rgrid-python`` prefix ("R grid port").
+name = "rgrid-python"
+# Track the R ``grid`` version 1:1.  When we patch the Python port without
+# a corresponding R update, bump a PEP 440 post-release suffix:
+#   "4.5.3"  → "4.5.3.post1"  → "4.5.3.post2"  → ...
+# When R grid itself ships a new upstream version, move to e.g. "4.5.4".
+version = "4.5.3"
+description = "Python port of the R grid package (tracks R grid 4.5.3)"
+readme = "README.md"
 requires-python = ">=3.10"
 license = "Artistic-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jeffery Liu", email = "jeffliu.lucky@gmail.com" },
+]
+keywords = [
+    "grid",
+    "graphics",
+    "ggplot2",
+    "R-port",
+    "scientific-visualization",
+    "visualization",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Artistic License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Multimedia :: Graphics",
+    "Typing :: Typed",
+]
 dependencies = [
     "numpy>=1.24",
     "pycairo>=1.20",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "ruff"]
-docs = ["mkdocs", "mkdocstrings[python]", "mkdocs-material", "mkdocs-jupyter"]
+dev = ["pytest", "pytest-cov", "ruff", "build", "twine"]
+docs = [
+    "mkdocs",
+    "mkdocstrings[python]",
+    "mkdocs-material",
+    "mkdocs-jupyter",
+]
+
+[project.urls]
+Homepage      = "https://github.com/Bio-Babel/grid_py"
+Repository    = "https://github.com/Bio-Babel/grid_py"
+Issues        = "https://github.com/Bio-Babel/grid_py/issues"
+Documentation = "https://github.com/Bio-Babel/grid_py#readme"
 
 [tool.hatch.build.targets.wheel]
+# Only the importable package goes into the wheel; no tutorials, docs, tests.
 packages = ["grid_py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["grid_py/", "tutorials/", "README.md", "LICENSE"]
+# sdist includes everything by default; explicitly drop the large / build-time
+# directories that users of ``pip install grid-py`` do not need.
+exclude = [
+    "tutorials/",
+    "docs/",
+    "tests/",
+    "mkdocs.yml",
+    ".github/",
+    "*.egg-info/",
+    "build/",
+    "dist/",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
