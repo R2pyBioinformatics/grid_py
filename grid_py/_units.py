@@ -1574,6 +1574,56 @@ def convert_unit(
             )
             if resolved is not None:
                 result_vals[i] = resolved
+            elif src_unit in ("sum", "min", "max"):
+                # R ``grid/src/unit.c: L_convert`` dispatches ``sum.unit`` /
+                # ``min.unit`` / ``max.unit`` via ``L_sumUnits`` /
+                # ``L_minUnits`` / ``L_maxUnits``, each of which calls
+                # ``convertUnit`` recursively on every child in the
+                # compound's list and combines the resulting absolute
+                # lengths. Without this branch the fallback at the end of
+                # this loop returns the outer scalar (1.0) unchanged —
+                # which is why ``convertWidth(unit(1,'grobwidth',g) +
+                # unit(0.05,'inches'),'cm')`` returned 1.0 regardless of
+                # the text's actual rendered width.
+                child = x._data[i]
+                if (
+                    child is not None
+                    and isinstance(child, Unit)
+                    and len(child) > 0
+                ):
+                    child_inches: List[float] = []
+                    for j in range(len(child)):
+                        sub = Unit.__new__(Unit)
+                        sub._values = np.array(
+                            [child._values[j]], dtype=np.float64,
+                        )
+                        sub._units = [child._units[j]]
+                        sub._data = [child._data[j]]
+                        sub._is_absolute = (
+                            child._units[j] in _ABSOLUTE_UNIT_TYPES
+                        )
+                        inches_arr = convert_unit(
+                            sub, "inches",
+                            axisFrom=axisFrom, typeFrom=typeFrom,
+                            axisTo=axisTo, typeTo=typeTo,
+                            valueOnly=True,
+                        )
+                        child_inches.append(float(inches_arr[0]))
+                    if src_unit == "sum":
+                        combined = float(np.sum(child_inches))
+                    elif src_unit == "min":
+                        combined = float(np.min(child_inches))
+                    else:
+                        combined = float(np.max(child_inches))
+                    combined *= float(x._values[i])
+                    if target in _ABSOLUTE_UNIT_TYPES:
+                        result_vals[i] = combined / _INCHES_PER[target]
+                    else:
+                        result_vals[i] = combined
+                        converted = False
+                else:
+                    result_vals[i] = x._values[i]
+                    converted = False
             elif src_unit in _STR_METRIC_TYPES:
                 # Fallback without renderer: string metric → inches → target
                 inches_val = _eval_str_metric(src_unit, x._data[i], x._values[i])
@@ -1583,18 +1633,34 @@ def convert_unit(
                     result_vals[i] = inches_val
                     converted = False
             elif src_unit in _GROB_METRIC_TYPES:
-                # Fallback: grob metric → inches → target
+                # Fallback: grob metric → inches → target.
+                # Mirrors R ``grid/src/unit.c``:
+                #   evaluateGrobUnit(..., evalType=2)
+                #     unitx <- widthDetails(grob)
+                #     result = transformWidthtoINCHES(unitx, 0, ...)
+                # R takes *only index 0* of ``widthDetails``'s return,
+                # relying on its methods (e.g. ``widthDetails.titleGrob``
+                # ``<- sum(x$widths)``) to wrap multi-element units as
+                # a single sum.unit. The recursive ``transformWidthtoINCHES``
+                # then unwraps L_SUM via the compound branch above.
                 metric_unit = _eval_grob_metric(src_unit, x._data[i])
-                if (
-                    metric_unit is not None
-                    and len(metric_unit) > 0
-                    and metric_unit._units[0] in _ABSOLUTE_UNIT_TYPES
-                ):
-                    src_inches = (
-                        metric_unit._values[0]
-                        * _INCHES_PER[metric_unit._units[0]]
+                if metric_unit is not None and len(metric_unit) > 0:
+                    head = Unit.__new__(Unit)
+                    head._values = np.array(
+                        [metric_unit._values[0]], dtype=np.float64,
                     )
-                    src_inches *= x._values[i]
+                    head._units = [metric_unit._units[0]]
+                    head._data = [metric_unit._data[0]]
+                    head._is_absolute = (
+                        metric_unit._units[0] in _ABSOLUTE_UNIT_TYPES
+                    )
+                    inches_arr = convert_unit(
+                        head, "inches",
+                        axisFrom=axisFrom, typeFrom=typeFrom,
+                        axisTo=axisTo, typeTo=typeTo,
+                        valueOnly=True,
+                    )
+                    src_inches = float(inches_arr[0]) * float(x._values[i])
                     if target in _ABSOLUTE_UNIT_TYPES:
                         result_vals[i] = src_inches / _INCHES_PER[target]
                     else:

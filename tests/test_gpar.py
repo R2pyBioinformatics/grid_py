@@ -353,5 +353,14 @@ class TestGparMisc:
         assert gp.get("col") == "red"
 
     def test_none_value_skipped(self):
-        gp = Gpar(col=None)
-        assert "col" not in gp
+        # Non-colour params: None is dropped silently.
+        gp = Gpar(lwd=None)
+        assert "lwd" not in gp
+
+    def test_colour_none_preserved_as_na(self):
+        # col=None / fill=None are preserved as [None] (NA sentinel) so the
+        # renderer can distinguish explicit NA from an absent parameter.
+        # Matches R's gpar(col=NA) → transparent stroke.
+        gp = Gpar(col=None, fill=None)
+        assert gp.get("col") == [None]
+        assert gp.get("fill") == [None]

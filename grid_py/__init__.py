@@ -18,6 +18,7 @@ from grid_py._just import valid_just, resolve_hjust, resolve_vjust, resolve_rast
 from grid_py._units import (
     Unit, is_unit, unit_type, unit_c, unit_length,
     unit_pmax, unit_pmin, unit_psum, unit_rep,
+    unit_summary_sum, unit_summary_min, unit_summary_max,
     string_width, string_height, string_ascent, string_descent,
     absolute_size,
     convert_unit, convert_x, convert_y, convert_width, convert_height,
@@ -226,6 +227,7 @@ __all__ = [
     # Units
     "Unit", "is_unit", "unit_type", "unit_c", "unit_length",
     "unit_pmax", "unit_pmin", "unit_psum", "unit_rep",
+    "unit_summary_sum", "unit_summary_min", "unit_summary_max",
     "string_width", "string_height", "string_ascent", "string_descent",
     "absolute_size",
     "convert_unit", "convert_x", "convert_y", "convert_width", "convert_height",

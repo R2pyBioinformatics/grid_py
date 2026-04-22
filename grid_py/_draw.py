@@ -109,6 +109,12 @@ def _subset_gpar(gp: Optional[Gpar], i: int) -> Optional[Gpar]:
             picked = val[i % len(val)]
         elif isinstance(val, (list, tuple)) and len(val) > 1:
             picked = val[i % len(val)]
+        elif isinstance(val, (list, tuple)) and len(val) == 1 \
+                and val[0] is None and key in ("col", "fill"):
+            # Length-1 [None] NA sentinel from Gpar(col=None)/Gpar(fill=None).
+            # Preserve the NA intent across subset — emit "transparent" so
+            # the renderer's scalar-colour path parses to (0,0,0,0).
+            picked = "transparent"
         else:
             picked = val
 

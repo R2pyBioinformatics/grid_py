@@ -336,12 +336,14 @@ class CairoRenderer(GridRenderer):
 
         col = gp.get("col", None)
         # R semantics:
-        #   * col=NULL (unset)      → inherit parent, default "black"
-        #   * col=NA (explicit)     → no stroke (transparent)
-        # In Python Gpar, None-scalar is dropped at construction, so
-        # ``gp.get("col") is None`` ≡ NULL.  A sequence whose entries
-        # are None (coming from ggplot2 ``colour=NA`` data) must be
-        # treated as NA, matching R's ``gpar(col=NA)``.
+        #   * col absent from gp          → inherit parent, default "black"
+        #   * Gpar(col=None)              → stored as [None] (NA sentinel)
+        #                                    → transparent (≡ R gpar(col=NA))
+        #   * sequence with first=None    → transparent (ggplot2 colour=NA)
+        #   * scalar string "NA"/"none"/  → transparent (resolved by
+        #     "transparent"                  _parse_colour)
+        # The [None] sentinel is produced by Gpar(col=None) — see
+        # _gpar.py Gpar.__init__.
         _is_seq = hasattr(col, "__len__") and not isinstance(col, str)
         if _is_seq:
             col_val = col[0]

@@ -582,11 +582,27 @@ class TestRendererApplyStroke:
         assert rgba[3] == 0.0
 
     def test_stroke_col_none(self):
-        """col=None (unset) defaults to black, matching R's default."""
+        """Gpar(col=None) means explicit NA → transparent stroke.
+
+        Mirrors R's ``gpar(col=NA)`` (see grid src/gpar.c:59-60 where
+        isNull(col) returns R_TRANWHITE).  Distinct from ``Gpar()``
+        (col absent) which still defaults to opaque black via the
+        ``gp is None`` early-return.
+        """
         r = CairoRenderer(width=5, height=4)
         gp = Gpar(col=None)
         rgba = r._apply_stroke(gp)
-        # col=None means unset → default black (opaque)
+        # col=None → [None] sentinel → transparent
+        assert rgba[3] == 0.0
+
+    def test_stroke_col_absent_defaults_black(self):
+        """Gpar() with no col key → inherit → default black.
+
+        Distinct from Gpar(col=None) (explicit NA → transparent).
+        """
+        r = CairoRenderer(width=5, height=4)
+        gp = Gpar(lwd=2.0)  # any non-col param, so gp is not None
+        rgba = r._apply_stroke(gp)
         assert rgba == (0.0, 0.0, 0.0, 1.0)
 
     def test_stroke_col_na(self):

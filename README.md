@@ -1,5 +1,7 @@
 # grid_py
 
+[![PyPI](https://img.shields.io/pypi/v/rgrid-python)](https://pypi.org/project/rgrid-python/)
+
 Python port of the R **grid** package.
 
 ## Installation

@@ -199,6 +199,14 @@ class Gpar:
         # -- process remaining parameters ----------------------------------
         for name, value in kwargs.items():
             if value is None:
+                # Colour parameters: preserve explicit None as a one-element
+                # NA sentinel so the renderer can tell "col absent (inherit,
+                # default black)" apart from "col explicitly NA (transparent)".
+                # Mirrors R's ``gpar(col=NA)`` / ``gpar(fill=NA)`` semantics
+                # (see R grid src/gpar.c gpCol(): isNull(col) → R_TRANWHITE).
+                # Other parameters have no NA semantic; drop silently.
+                if name in ("col", "fill"):
+                    params[name] = [None]
                 continue
 
             vals = _as_list(value)
@@ -283,8 +291,16 @@ class Gpar:
                 # backend, matching R's behaviour).
                 pass
 
-            # Store single-element lists as scalars for cleaner repr.
-            params[name] = vals[0] if len(vals) == 1 else vals
+            # Store single-element lists as scalars for cleaner repr,
+            # except for the colour NA sentinel [None] which must stay a
+            # sequence so the renderer treats it as R's gpar(col=NA).
+            if len(vals) == 1:
+                if name in ("col", "fill") and vals[0] is None:
+                    params[name] = [None]
+                else:
+                    params[name] = vals[0]
+            else:
+                params[name] = vals
 
         self._params = params
 
