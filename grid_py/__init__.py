@@ -25,7 +25,7 @@ from grid_py._units import (
 )
 
 # --- Graphical Parameters ---
-from grid_py._gpar import Gpar, get_gpar
+from grid_py._gpar import Gpar, get_gpar, gpar
 
 # --- Arrow ---
 from grid_py._arrow import Arrow, arrow
@@ -232,7 +232,7 @@ __all__ = [
     "absolute_size",
     "convert_unit", "convert_x", "convert_y", "convert_width", "convert_height",
     # Gpar
-    "Gpar", "get_gpar",
+    "Gpar", "gpar", "get_gpar",
     # Arrow
     "Arrow", "arrow",
     # Path

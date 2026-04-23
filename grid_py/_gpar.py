@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
-__all__ = ["Gpar", "get_gpar"]
+__all__ = ["Gpar", "gpar", "get_gpar"]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -586,3 +586,14 @@ def get_gpar(names: Optional[Sequence[str]] = None) -> Gpar:
     gp = object.__new__(Gpar)
     gp._params = subset
     return gp
+
+
+def gpar(**kwargs: Any) -> Gpar:
+    """Factory mirroring R ``grid::gpar(...)``.
+
+    R's ``gpar`` function constructs a ``gpar`` object from arbitrary
+    keyword arguments. ``Gpar(**kwargs)`` does the same, so this is a
+    thin alias kept for direct R-to-Python translation of code that
+    reads ``gpar(col="red")``.
+    """
+    return Gpar(**kwargs)
