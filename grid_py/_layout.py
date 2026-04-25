@@ -400,16 +400,23 @@ def _calc_layout_sizes(
     reduced_h = max(reduced_h, 0.0)
 
     # ---- Phase 2: allocate respected null units (layout.c:allocateRespected)
+    # R sums ALL relative widths/heights via totalWidth/totalHeight
+    # (layout.c:154-194) — not just the respected ones — when computing
+    # the aspect-ratio normalisation denominator. This is what lets a
+    # respect matrix that marks a single cell coexist with other null
+    # cells in the same dimension; restricting the sum to respected
+    # cells (the prior Python implementation) over-allocated the
+    # respected slot and collapsed everything else to 0.
     if layout._valid_respect > 0 and (reduced_w > 0 or reduced_h > 0):
         sum_w = sum(
             float(widths._values[i])
             for i in range(ncol)
-            if relative_w[i] and _col_respected(i, layout)
+            if relative_w[i]
         )
         sum_h = sum(
             float(heights._values[j])
             for j in range(nrow)
-            if relative_h[j] and _row_respected(j, layout)
+            if relative_h[j]
         )
 
         temp_w = reduced_w
