@@ -249,9 +249,30 @@ class GridRenderer(ABC):
                 # Cell position in parent's NPC then inches
                 parent_w_dev = parent_vtr.width_cm / 2.54 * self._dev_units_per_inch
                 parent_h_dev = parent_vtr.height_cm / 2.54 * self._dev_units_per_inch
-                cell_x_in = cell_x0_dev / self._dev_units_per_inch
-                # Device y is top-down; convert to bottom-up inches
-                cell_y_in = parent_h_in - (cell_y0_dev + cell_h_dev) / self._dev_units_per_inch
+
+                # Apply layout-level hjust / vjust (R: layout.c::subRegion
+                # lines 447-450). When the cells' total dimensions don't
+                # fill the parent vp (common for chrome-merge slices in
+                # patchwork), the leftover space is distributed per the
+                # layout's justification (default 0.5 → centred). The
+                # prior implementation always pinned cells to top-left
+                # (vjust=1, hjust=0), which placed merged chrome at the
+                # top of the parent panel cell rather than just outside
+                # it, breaking simplify_fixed renders.
+                hjust = float(grid.get("hjust", 0.0))
+                vjust = float(grid.get("vjust", 1.0))
+                total_w_dev = sum(col_widths)
+                total_h_dev = sum(row_heights)
+                hjust_offset_dev = hjust * (parent_w_dev - total_w_dev)
+                vjust_offset_dev = (1.0 - vjust) * (parent_h_dev - total_h_dev)
+
+                cell_x_in = (cell_x0_dev + hjust_offset_dev) / self._dev_units_per_inch
+                # Device y is top-down; convert to bottom-up inches.
+                # vjust_offset_dev shifts the block downward in device-y
+                # (i.e. upward in bottom-up coords) by the leftover * (1-vjust).
+                cell_y_in = parent_h_in - (
+                    cell_y0_dev + cell_h_dev + vjust_offset_dev
+                ) / self._dev_units_per_inch
 
                 # Build a simple translation transform for the cell
                 from ._vp_calc import translation, multiply
@@ -422,9 +443,24 @@ class GridRenderer(ABC):
         col_starts = [sum(col_widths[:i]) for i in range(ncol)]
         row_starts = [sum(row_heights[:i]) for i in range(nrow)]
 
+        # Layout justification (R: layout.c::subRegion lines 433-450).
+        # When the cells' total size is less than the parent vp, hjust /
+        # vjust shift the layout block within the parent (default 0.5 →
+        # centred). ``GridLayout`` carries this on ``_valid_just`` as
+        # (hjust, vjust); fall back to (0, 1) for non-GridLayout
+        # containers (matching the prior top-left alignment).
+        valid_just = getattr(layout, "_valid_just", None)
+        if valid_just is not None:
+            hjust = float(valid_just[0])
+            vjust = float(valid_just[1])
+        else:
+            hjust, vjust = 0.0, 1.0
+
         return {
             "col_starts": col_starts, "col_widths": col_widths,
             "row_starts": row_starts, "row_heights": row_heights,
+            "parent_w": parent_w, "parent_h": parent_h,
+            "hjust": hjust, "vjust": vjust,
         }
 
     def _resolve_sizes(self, unit_obj: Any, n: int, total: float,

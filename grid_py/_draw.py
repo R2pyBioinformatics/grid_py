@@ -690,24 +690,44 @@ def _pop_grob_vp(vp: Any) -> None:
 def _vp_depth(vp: Any) -> int:
     """Return the depth of a viewport (number of levels it adds).
 
+    Mirrors R's ``depth()`` generic (grid R/grid.R) for every viewport
+    container: VpStack pushes ``sum(depth(child))`` levels, VpList
+    pushes ``depth(last)``, VpTree pushes ``depth(parent) + depth(last
+    child)``, plain Viewport pushes 1, VpPath pushes ``n``.
+
+    Recognised types are routed through :func:`._viewport.depth` (the
+    canonical R-faithful dispatch); this is what guarantees
+    ``_pop_grob_vp(grob.vp)`` pops the right count when a Gtable's
+    ``make_context`` returns ``VpStack(orig_vp, layout_vp)``. The
+    prior implementation only checked ``hasattr(vp, "depth")`` —
+    VpStack/VpList don't expose a method, so it fell through to
+    ``return 1`` and left every nested layout vp on the layout_stack
+    after the gtable rendered, breaking every grob drawn after.
+
+    Duck-typed objects with a ``.depth()`` method (used by tests and
+    user-defined viewport-like objects) are still honoured as a
+    fallback for unknown types.
+
     Parameters
     ----------
     vp : Any
-        A viewport, VpPath, VpStack, VpList, or VpTree.
+        A viewport, VpPath, VpStack, VpList, VpTree, or any
+        depth-bearing duck-typed object.
 
     Returns
     -------
     int
         The depth.
     """
+    from ._viewport import (
+        Viewport, VpList, VpStack, VpTree, depth as _depth,
+    )
     from ._path import VpPath
 
-    if isinstance(vp, VpPath):
-        # VpPath stores the number of path components
-        return getattr(vp, "n", 1)
+    if isinstance(vp, (Viewport, VpList, VpStack, VpTree, VpPath)):
+        return _depth(vp)
     if hasattr(vp, "depth"):
         return vp.depth()
-    # Default single viewport depth
     return 1
 
 
