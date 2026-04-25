@@ -280,9 +280,12 @@ class GridRenderer(ABC):
                 if layout is not None:
                     w_dev = cell_w_dev
                     h_dev = cell_h_dev
-                    respect = getattr(layout, "respect", False)
-                    grid_info = self._compute_grid(
-                        layout, w_dev, h_dev, respect=bool(respect))
+                    # R: ``calcViewportLayout`` (layout.c:492-590) reads
+                    # ``layoutRespect(layout)`` / ``layoutRespectMat(layout)``
+                    # straight off the layout object — there is no caller-side
+                    # respect argument. Mirror that: ``_calc_layout_sizes``
+                    # consumes ``layout._valid_respect`` directly.
+                    grid_info = self._compute_grid(layout, w_dev, h_dev)
                     self._layout_stack.append(grid_info)
                     self._layout_depth_stack.append(
                         len(self._vp_transform_stack))
@@ -294,8 +297,9 @@ class GridRenderer(ABC):
             # Compute grid in device units for layout children.
             w_dev = parent_vtr.width_cm / 2.54 * self._dev_units_per_inch
             h_dev = parent_vtr.height_cm / 2.54 * self._dev_units_per_inch
-            respect = getattr(layout, "respect", False)
-            grid_info = self._compute_grid(layout, w_dev, h_dev, respect=bool(respect))
+            # See R layout.c:492-590 — respect lives on the layout object;
+            # callers don't pass it down.
+            grid_info = self._compute_grid(layout, w_dev, h_dev)
 
             # The layout viewport itself has the same transform as parent
             # but we create a new VTR with the vp's xscale/yscale
@@ -388,9 +392,15 @@ class GridRenderer(ABC):
 
     def _compute_grid(
         self, layout: Any, parent_w: float, parent_h: float,
-        respect: bool = False,
     ) -> dict:
-        """Compute row/column positions for a GridLayout within the parent."""
+        """Compute row/column positions for a GridLayout within the parent.
+
+        R reference: ``layout.c:calcViewportLayout`` (lines 492-590).
+        Respect (full or matrix-form) lives on the layout object itself —
+        ``_calc_layout_sizes`` reads ``layout._valid_respect`` directly,
+        so this signature has no ``respect`` argument (matches R, where
+        there is no caller-side respect parameter either).
+        """
         from ._layout import _calc_layout_sizes, GridLayout
 
         if isinstance(layout, GridLayout):
